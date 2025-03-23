@@ -37,7 +37,7 @@ def allowed_chat(message):
 
 def attack(ip, port, time_duration, chat_id):
     """Function to handle the attack command."""
-    command = f"./venom {ip} {port} {time_duration} &"  # Update this path if necessary
+    command = f"./venom {ip} {port} {time_duration}"  # Update this path if necessary
     try:
         process = subprocess.Popen(shlex.split(command),
                                    stdout=subprocess.PIPE,
