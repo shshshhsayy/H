@@ -826,7 +826,7 @@ def add_credit_command(message):
     safe_reply(message, f"<b>✅ Added {amount} credits to admin {target_id}.</b> New balance: {get_credit_balance(target_id)}")
 
 # ---------------------------
-# New Admin Management Commands
+# New Admin Management Commands with Robust Error Handling
 # ---------------------------
 @bot.message_handler(commands=['addadmin'])
 @safe_handler
@@ -834,37 +834,51 @@ def add_admin_handler(message):
     if message.from_user.id != BOT_OWNER_ID:
         safe_reply(message, "<b>🚫 Not authorized to add admin!</b>")
         return
-    command_parts = message.text.split()
-    if len(command_parts) not in [2, 3]:
-        safe_reply(message, "<b>❓ Usage:</b> /addadmin <admin_id> [initial_credit]")
-        return
-    target_admin = command_parts[1]
     try:
-        admin_id = int(target_admin)
-    except ValueError:
-        safe_reply(message, "<b>❌ Admin ID must be an integer.</b>")
-        return
-    initial_credit = 1000  # default initial credit
-    if len(command_parts) == 3:
-        try:
-            initial_credit = int(command_parts[2])
-        except ValueError:
-            safe_reply(message, "<b>❌ Initial credit must be an integer.</b>")
+        command_parts = message.text.split()
+        if len(command_parts) not in [2, 3]:
+            safe_reply(message, "<b>❓ Usage:</b> /addadmin <admin_id> [initial_credit]")
             return
-    if str(admin_id) in admin_credits:
-        safe_reply(message, f"<b>ℹ️ Admin {admin_id} already exists with {admin_credits[str(admin_id)]['balance']} credits.</b>")
-        return
-    admin_credits[str(admin_id)] = {
-        "balance": initial_credit,
-        "history": [{
-            "type": "add",
-            "amount": initial_credit,
-            "reason": "Admin addition",
-            "timestamp": datetime.now().isoformat()
-        }]
-    }
-    save_admin_credits_data()
-    safe_reply(message, f"<b>✅ Admin {admin_id} added with {initial_credit} credits.</b>")
+
+        target_admin = command_parts[1]
+        try:
+            admin_id = int(target_admin)
+        except ValueError as ve:
+            safe_reply(message, "<b>❌ Admin ID must be an integer.</b>")
+            return
+
+        initial_credit = 1000  # default initial credit
+        if len(command_parts) == 3:
+            try:
+                initial_credit = int(command_parts[2])
+            except ValueError as ve:
+                safe_reply(message, "<b>❌ Initial credit must be an integer.</b>")
+                return
+
+        if str(admin_id) in admin_credits:
+            safe_reply(message, f"<b>ℹ️ Admin {admin_id} already exists with {admin_credits[str(admin_id)]['balance']} credits.</b>")
+            return
+
+        admin_credits[str(admin_id)] = {
+            "balance": initial_credit,
+            "history": [{
+                "type": "add",
+                "amount": initial_credit,
+                "reason": "Admin addition",
+                "timestamp": datetime.now().isoformat()
+            }]
+        }
+        try:
+            save_admin_credits_data()
+        except Exception as e:
+            safe_reply(message, "<b>❌ Failed to save admin data. Please try again later.</b>")
+            log_execution(f"Error saving admin credits in /addadmin: {e}")
+            return
+
+        safe_reply(message, f"<b>✅ Admin {admin_id} added with {initial_credit} credits.</b>")
+    except Exception as e:
+        safe_reply(message, f"<b>❌ Unexpected error in /addadmin:</b> {str(e)}")
+        log_execution(f"Unexpected error in add_admin_handler: {traceback.format_exc()}")
 
 @bot.message_handler(commands=['removeadmin'])
 @safe_handler
@@ -872,22 +886,35 @@ def remove_admin_handler(message):
     if message.from_user.id != BOT_OWNER_ID:
         safe_reply(message, "<b>🚫 Not authorized to remove admin!</b>")
         return
-    command_parts = message.text.split()
-    if len(command_parts) != 2:
-        safe_reply(message, "<b>❓ Usage:</b> /removeadmin <admin_id>")
-        return
-    target_admin = command_parts[1]
     try:
-        admin_id = int(target_admin)
-    except ValueError:
-        safe_reply(message, "<b>❌ Admin ID must be an integer.</b>")
-        return
-    if str(admin_id) not in admin_credits:
-        safe_reply(message, f"<b>❌ Admin {admin_id} not found.</b>")
-        return
-    del admin_credits[str(admin_id)]
-    save_admin_credits_data()
-    safe_reply(message, f"<b>✅ Admin {admin_id} removed.</b>")
+        command_parts = message.text.split()
+        if len(command_parts) != 2:
+            safe_reply(message, "<b>❓ Usage:</b> /removeadmin <admin_id>")
+            return
+
+        target_admin = command_parts[1]
+        try:
+            admin_id = int(target_admin)
+        except ValueError as ve:
+            safe_reply(message, "<b>❌ Admin ID must be an integer.</b>")
+            return
+
+        if str(admin_id) not in admin_credits:
+            safe_reply(message, f"<b>❌ Admin {admin_id} not found.</b>")
+            return
+
+        try:
+            del admin_credits[str(admin_id)]
+            save_admin_credits_data()
+        except Exception as e:
+            safe_reply(message, "<b>❌ Failed to remove admin data. Please try again later.</b>")
+            log_execution(f"Error saving admin credits in /removeadmin: {e}")
+            return
+
+        safe_reply(message, f"<b>✅ Admin {admin_id} removed.</b>")
+    except Exception as e:
+        safe_reply(message, f"<b>❌ Unexpected error in /removeadmin:</b> {str(e)}")
+        log_execution(f"Unexpected error in remove_admin_handler: {traceback.format_exc()}")
 
 # ---------------------------
 # Echo Command (for testing)
