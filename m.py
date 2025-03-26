@@ -1,6 +1,23 @@
 #!/usr/bin/env python3
-import telebot
-import paramiko
+import subprocess
+import sys
+
+def install(package):
+    subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+
+# Check and install required packages
+try:
+    import telebot
+except ImportError:
+    install("pyTelegramBotAPI")
+    import telebot
+
+try:
+    import paramiko
+except ImportError:
+    install("paramiko")
+    import paramiko
+
 import threading
 import time
 import json
@@ -892,7 +909,7 @@ def remove_admin_handler(message):
             safe_reply(message, "<b>❓ Usage:</b> /removeadmin <admin_id>")
             return
 
-        target_admin = command_parts[1]
+        target_admin = message.text.split()[1]
         try:
             admin_id = int(target_admin)
         except ValueError as ve:
